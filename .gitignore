@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+
+# World state — exclude sensitive escalations and session tokens from git
+# but keep the folder structure
+world/sessions/
+world/reports/escalations.json
+
+# OS
+.DS_Store
+Thumbs.db

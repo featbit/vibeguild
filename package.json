@@ -1,0 +1,29 @@
+{
+  "name": "vibeguild",
+  "version": "0.1.0",
+  "description": "Vibe Guild — an autonomous AI world for FeatBit vibe marketing",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env --import tsx src/world.ts start",
+    "task": "node --env-file=.env --import tsx src/world.ts task",
+    "meetup": "node --env-file=.env --import tsx src/world.ts meetup",
+    "status": "node --env-file=.env --import tsx src/world.ts status",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.47",
+    "chokidar": "^5.0.0",
+    "commander": "^14.0.3",
+    "node-cron": "^4.2.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "@types/node-cron": "^3.0.11",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}
