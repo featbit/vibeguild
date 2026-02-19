@@ -2,11 +2,44 @@ node_modules/
 dist/
 .env
 
-# World state — exclude sensitive escalations and session tokens from git
-# but keep the folder structure
-world/sessions/
-world/reports/escalations.json
+# ── World runtime data ─────────────────────────────────────────────────────────
+# Everything under world/ is generated at runtime and should not be committed.
+# Folder structure is preserved via .gitkeep files.
 
-# OS
+# Being directories (entire subtree per being)
+world/beings/*/
+
+# Flat runtime files
+world/signals.json
+world/memory/world.json
+
+# Memory rollups — ignore json files, keep folder via .gitkeep
+world/memory/daily/*
+!world/memory/daily/.gitkeep
+world/memory/weekly/*
+!world/memory/weekly/.gitkeep
+world/memory/monthly/*
+!world/memory/monthly/.gitkeep
+world/memory/project/*
+!world/memory/project/.gitkeep
+world/memory/team/*
+!world/memory/team/.gitkeep
+
+# Sessions — ignore json files, keep folder via .gitkeep
+world/sessions/*
+!world/sessions/.gitkeep
+
+# Reports — ignore json files, keep folder via .gitkeep
+world/reports/*
+!world/reports/.gitkeep
+
+# Task queue — ignore json file, keep folder via .gitkeep
+world/tasks/*
+!world/tasks/.gitkeep
+
+# Output deliverables
+output/
+
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

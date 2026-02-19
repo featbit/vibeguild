@@ -17,7 +17,7 @@ Instead of a single AI assistant, Vibe Guild runs as a **living team of AI being
 
 1. **Shift-based autonomy**: 8-minute work + 2-minute rest per day (MVP), forcing structured summaries and reducing context drift.
 2. **Multi-horizon memory**: Private self-notes + shared team/project records + world history for cumulative learning.
-3. **Task intelligence**: Supports decomposition, team formation, and task-level concurrency limits (`maxBeings`) to match model rate constraints.
+3. **Dynamic being pool**: The pool starts empty and grows entirely on demand — no upper limit. Each turn the engine checks which beings are free vs busy. Free beings are assigned first; when a task needs more capacity than is available, the Orchestrator creates new beings (from a template) automatically. Each being may only work on one task at a time.
 4. **Human-in-the-loop by design**: Meetups can freeze all beings at atomic boundaries, let humans redirect, then resume exactly where work stopped.
 5. **Self-improving capability layer**: Beings can create tools/skills, promote useful ones to `world/shared/`, and sync them into the world engine.
 
@@ -43,7 +43,7 @@ In short: **an AI-native execution system for consistent marketing output, not o
 Vibe Guild is a persistent AI world for FeatBit marketing:
 
 - **Mission**: turn trend signals into insights and content continuously.
-- **Unit of execution**: AI beings that self-organize into teams.
+- **Unit of execution**: Dynamic pool of AI beings — starts empty, grows on demand, no upper limit. Free beings are reused first; new ones are created when capacity is needed. One task per being at a time.
 - **Cadence**: fixed work/rest shifts to enforce summaries and continuity.
 - **Memory**: being/team/project/world layers + periodic rollups.
 - **Control**: meetup freeze/resume + explicit escalation to human.

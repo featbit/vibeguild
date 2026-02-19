@@ -4,20 +4,30 @@ import { appendSignal } from '../memory/store.js';
 // 8 minutes work → 2 minutes rest → new day
 const WORK_DURATION_MS = 8 * 60 * 1000;
 const DAY_DURATION_MS = 10 * 60 * 1000;
-const REST_DURATION_MS = DAY_DURATION_MS - WORK_DURATION_MS;
+export const REST_DURATION_MS = DAY_DURATION_MS - WORK_DURATION_MS;
 
 let restTimer: ReturnType<typeof setTimeout> | null = null;
 let dayTimer: ReturnType<typeof setTimeout> | null = null;
 let running = false;
 
+// Callback registered by world loop — called when the clock wants to interrupt
+// the current query() turn (on rest start and day end).
+let interruptCallback: (() => void) | null = null;
+
+export const registerInterruptCallback = (cb: () => void): void => {
+  interruptCallback = cb;
+};
+
 const onRestStart = async (): Promise<void> => {
-  console.log(`\n⏸  [CLOCK] Rest period started — beings should complete current actions and write shift summaries.`);
+  console.log(`\n⏸  [CLOCK] Rest period started — interrupting current turn for shift rest.`);
   await appendSignal('SHIFT_REST_START', { restDurationMs: REST_DURATION_MS });
+  interruptCallback?.();
 };
 
 const onDayEnd = async (startNextCycle: () => void): Promise<void> => {
-  console.log(`\n🌅 [CLOCK] Day ended — writing daily record and starting new day.`);
+  console.log(`\n🌅 [CLOCK] Day ended — interrupting current turn to write daily record.`);
   await appendSignal('SHIFT_DAY_END');
+  interruptCallback?.();
   if (running) {
     startNextCycle();
   }

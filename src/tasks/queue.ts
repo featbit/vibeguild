@@ -69,15 +69,21 @@ export const getTasksByStatus = async (status: TaskStatus): Promise<Task[]> => {
 export const updateTaskStatus = async (
   taskId: string,
   status: TaskStatus,
-  assignedTo?: string,
+  assignedTo?: string | string[],
 ): Promise<void> => {
   const tasks = await readQueue();
   const updated = tasks.map((t) => {
     if (t.id !== taskId) return t;
+    // Normalize assignedTo: always store as string[] regardless of source format
+    const normalizedAssignedTo = assignedTo !== undefined
+      ? (Array.isArray(assignedTo) ? assignedTo : [assignedTo])
+      : t.assignedTo !== undefined
+        ? (Array.isArray(t.assignedTo) ? t.assignedTo : [t.assignedTo as unknown as string])
+        : undefined;
     return {
       ...t,
       status,
-      ...(assignedTo !== undefined ? { assignedTo } : {}),
+      ...(normalizedAssignedTo !== undefined ? { assignedTo: normalizedAssignedTo } : {}),
       ...(status === 'completed' ? { completedAt: new Date().toISOString() } : {}),
       updatedAt: new Date().toISOString(),
     };
@@ -86,6 +92,22 @@ export const updateTaskStatus = async (
 };
 
 export const getAllTasks = readQueue;
+
+/**
+ * Returns the set of beings currently assigned to an active task
+ * (status: assigned or in-progress). Used to enforce the rule that
+ * a being may only work on one task at a time.
+ */
+export const getBusyBeings = async (): Promise<string[]> => {
+  const tasks = await readQueue();
+  const busy = new Set<string>();
+  for (const t of tasks) {
+    if ((t.status === 'assigned' || t.status === 'in-progress') && Array.isArray(t.assignedTo)) {
+      for (const b of t.assignedTo) busy.add(b);
+    }
+  }
+  return [...busy];
+};
 
 export const getTaskSummary = async (): Promise<{
   pending: number;

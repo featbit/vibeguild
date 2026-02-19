@@ -19,7 +19,7 @@ export type Task = {
   description: string;
   status: TaskStatus;
   type: TaskType;
-  assignedTo?: string;
+  assignedTo?: string[];
   teamId?: string;
   parentId?: string;
   dependencies: string[];

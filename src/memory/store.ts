@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -17,10 +17,13 @@ const ROOT = join(__dirname, '..', '..', 'world');
 const paths = {
   worldState: join(ROOT, 'memory', 'world.json'),
   signals: join(ROOT, 'signals.json'),
+  runtimeState: join(ROOT, 'sessions', 'runtime.json'),
   daily: (date: string) => join(ROOT, 'memory', 'daily', `${date}.json`),
   team: (teamId: string) => join(ROOT, 'memory', 'team', `${teamId}.json`),
   shiftSummary: (beingId: string, timestamp: string) =>
     join(ROOT, 'beings', beingId, 'memory', 'shifts', `${timestamp}.json`),
+  beingShiftsDir: (beingId: string) =>
+    join(ROOT, 'beings', beingId, 'memory', 'shifts'),
   beingProfile: (beingId: string) =>
     join(ROOT, 'beings', beingId, 'profile.json'),
   escalations: join(ROOT, 'reports', 'escalations.json'),
@@ -111,10 +114,28 @@ export const markSignalProcessed = async (signalId: string): Promise<void> => {
 export const drainPendingSignals = async (): Promise<WorldSignal[]> => {
   const signals = await readSignals();
   const pending = signals.filter((s) => !s.processed);
+  // Mark all pending as processed, then prune: keep only last 100 processed
   const allProcessed = signals.map((s) => ({ ...s, processed: true }));
-  await writeSignals(allProcessed);
+  const pruned = allProcessed.slice(-100);
+  await writeSignals(pruned);
   return pending;
 };
+
+// --- Runtime State (frozen / resting — survives status reads) ---
+
+export type RuntimeState = {
+  frozen: boolean;
+  resting: boolean;
+  updatedAt: string;
+};
+
+const defaultRuntimeState: RuntimeState = { frozen: false, resting: false, updatedAt: '' };
+
+export const readRuntimeState = (): Promise<RuntimeState> =>
+  readJson<RuntimeState>(paths.runtimeState, defaultRuntimeState);
+
+export const writeRuntimeState = (state: Omit<RuntimeState, 'updatedAt'>): Promise<void> =>
+  writeJson(paths.runtimeState, { ...state, updatedAt: new Date().toISOString() });
 
 // --- Daily Records ---
 
@@ -154,6 +175,51 @@ export const updateBeingStatus = async (
 
 export const writeShiftSummary = (summary: ShiftSummary): Promise<void> =>
   writeJson(paths.shiftSummary(summary.beingId, summary.timestamp), summary);
+
+// --- Being shift helpers ---
+
+/**
+ * Return the filenames of shift summaries for a given being that were written
+ * on the given date (YYYY-MM-DD). Files are named with a timestamp prefix.
+ */
+export const listBeings = async (): Promise<string[]> => {
+  try {
+    const beingsDir = join(ROOT, 'beings');
+    const entries = await readdir(beingsDir, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Scaffold the directory structure for a new being.
+ * Creates: memory/shifts/, memory/self-notes/, skills/, tools/
+ * The caller is responsible for writing profile.json and .claude/agents/{id}.md
+ */
+export const createBeingDirectories = async (beingId: string): Promise<void> => {
+  const base = join(ROOT, 'beings', beingId);
+  await Promise.all([
+    mkdir(join(base, 'memory', 'shifts'), { recursive: true }),
+    mkdir(join(base, 'memory', 'self-notes'), { recursive: true }),
+    mkdir(join(base, 'skills'), { recursive: true }),
+    mkdir(join(base, 'tools'), { recursive: true }),
+  ]);
+};
+
+export const listTodayShifts = async (beingId: string, date: string): Promise<string[]> => {
+  try {
+    const dir = paths.beingShiftsDir(beingId);
+    const files = await readdir(dir);
+    // Match files whose name starts with the date (YYYYMMDD) or contains it
+    const dateCompact = date.replace(/-/g, '');
+    return files.filter((f) => f.startsWith(dateCompact) || f.includes(date));
+  } catch {
+    return [];
+  }
+};
 
 // --- Team Records ---
 

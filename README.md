@@ -131,13 +131,21 @@ The key distinction: `src/` and `.claude/` are the laws of the world (you write 
 
 ### Beings
 
-Beings are defined in `.claude/agents/{id}.md`. There are 30 defined; only those with
-active tasks are live at any time (keeps token costs lean). All are broadly capable.
-Demonstrated history — stored in `world/beings/{id}/profile.json` — shapes which
-being gets assigned to which task.
+Beings are defined in `.claude/agents/{id}.md` and tracked in `world/beings/{id}/profile.json`.
+The pool starts empty and grows entirely on demand — no fixed roster, no upper limit.
 
-After each task cycle, the Orchestrator updates a being's description with newly
-demonstrated skills. Beings evolve over time.
+**Assignment strategy (enforced every turn):**
+1. Free existing beings are assigned first.
+2. If a task needs more capacity than is currently free, the Orchestrator creates new beings on demand.
+3. Each being may only work on **one task at a time** — the engine tracks occupancy via `getBusyBeings()` and surfaces it in every Orchestrator prompt.
+
+**Creating a new being (done by the Orchestrator, not by you):**
+1. Read `.claude/agents/_template.md`, fill in the role placeholders, save as `.claude/agents/{name}.md`.
+2. Write `world/beings/{name}/profile.json` with `id`, `name`, `role`, `description`, `skills[]`, `status: "idle"`, `createdAt`.
+3. The engine auto-scaffolds `memory/shifts/`, `memory/self-notes/`, `skills/`, `tools/` on the next turn.
+
+Demonstrated history — stored in `world/beings/{id}/profile.json` — shapes which
+being gets assigned to which task. Beings evolve as they accumulate experience.
 
 ### Memory
 
