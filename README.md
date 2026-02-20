@@ -1,7 +1,9 @@
 # Vibe Guild
 
 An autonomous AI world that works for FeatBit's vibe marketing — continuously,
-without being told what to do next.
+without being told what to do next. The human operator stays in control: add tasks,
+monitor progress, and intervene via meetup at any point to redirect work, add team
+members, or inject new requirements.
 
 ## What It Does
 
@@ -69,7 +71,7 @@ Options:
 |------|--------|---------|-------------|
 | `--priority` | `low` `normal` `high` `critical` | `normal` | Task urgency |
 | `--plan` | — | off | Require plan approval from human before execution |
-| `--max-beings` | `1`, `2`, `3`… | unlimited | Max beings the Orchestrator may activate for this task. Use `1` or `2` to limit concurrent LLM calls when your model has rate/concurrency constraints. |
+| `--max-beings` | `1`, `2`, `3`… | unlimited | Total number of *distinct* beings the Leader may use across the whole task (including itself). The same being can be re-called multiple times without counting again. Use `1` to have the leader work alone. |
 
 ### Check task progress
 
@@ -77,17 +79,24 @@ Options:
 npm run progress -- <taskId>    # full or short (prefix) ID
 ```
 
-Reads `world/tasks/{id}/progress.json` — written by the task leader after each
-milestone. Shows leader, status, percent complete, summary, and checkpoints.
+Reads `world/tasks/{id}/progress.json` — written by the task leader at
+self-decided checkpoints (leader reads `world/memory/world.json` first, so
+each report includes `worldDay` + `reportedAt` for world-clock context).
+Shows leader, world day, status, percent complete, summary, and checkpoints.
 
-### Schedule a meetup (freeze + talk)
+### Schedule a meetup (hard freeze + talk)
+
+Meetup is a **hard interrupt** — it calls `AbortController.abort()` on the
+target runner(s). Use it for conversational or local-file tasks where stopping
+mid-turn is safe. For sandbox tasks running code or holding ports, use
+`/msg --task` instead (soft injection, no abort).
 
 **Global freeze — all runners pause:**
 ```bash
 npm run meetup
 ```
 
-Switching to the `npm start` terminal, type freely. When finished:
+Switch to the `npm start` terminal, type freely. When finished:
 
 ```
 /done
@@ -109,7 +118,7 @@ Terminal commands available at any time in the `npm start` window:
 |-------|--------|
 | `/done` or `/resume` | End meetup (global or task), resume runner(s) |
 | `/task <description>` | Add a task directly from the world terminal |
-| `/msg --task <id> <message>` | Send a message to a specific task runner |
+| `/msg --task <id> <message>` | Inject a message into a runner (soft, no abort — safe for sandbox tasks) |
 | Any other text | Queued as a human message to the Orchestrator |
 
 ### Check escalations
@@ -134,18 +143,43 @@ Inside the scheduler each tick:
 2. Start a `TaskRunner` for every newly assigned task — tasks run **in parallel**
 3. Run a short Orchestrator turn only when there are pending tasks or human messages
 
-Each `TaskRunner` owns an independent `query()` session. The session ID is written
+Each `TaskRunner` owns an independent `query()` session. The session ID is persisted
 to `world/sessions/tasks/{taskId}.json` on every init message, enabling seamless
-resume after rest periods or crashes.
+resume after crashes or hard-abort meetups.
 
-At rest time:
-- All runners are paused (AbortController)
-- Every being runs a parallel shift-summary turn (writes `world/beings/{id}/memory/shifts/`)
-- The scheduler waits for day-end before resuming runners
+**Subagent tree — real parallel agents, not role-play:**
+```
+TaskRunner.query()         ← Orchestrator (independent Claude instance)
+    └─ Task → Leader       ← real subagent, own context
+          ├─ Task → Being A     ← can run in parallel with B
+          └─ Task → Being B     ← result flows back to Leader only
+```
+Being A and B are separate Claude instances. A's result enters Leader's context;
+B doesn't see it unless Leader passes it along. The Leader decides whether to run
+members in parallel (independent subtasks) or serially (B needs A's output).
+The same being can be called multiple times across rounds — each call is a fresh
+instance. `--max-beings N` limits the total number of *distinct* beings the Leader
+may use across the whole task (including itself).
 
-At the end of each day:
-- The engine writes `world/memory/daily/{date}.json`
-- All paused runners resume from their last saved session checkpoint
+We use the subagent tree instead of Claude Code's experimental Agent Teams because:
+Agent Teams are unstable (no session resumption, known coordination bugs), do not
+support nested team spawning, and store state in `~/.claude/` rather than `world/`.
+The `Task` tool gives us the same real-parallelism without those constraints.
+
+**The shift clock is soft — it never interrupts running tasks.** At rest time the
+engine injects a message into each runner: *"at your next safe stopping point, write
+a checkpoint and shift summary, then continue."* The leader decides when to pause
+between tool calls. This makes the system safe for tasks that hold open ports, run
+in sandboxes, or do multi-step code execution.
+
+At the end of each day the engine reads all observable state (progress files, shift
+files already written, escalations) and writes `world/memory/daily/{date}.json`.
+Runners keep going — the clock is a logging cadence, not a work cycle controller.
+
+**The only hard interrupt** is `npm run meetup (global or `--task <id>`), which calls
+`AbortController.abort()` and resumes from the last session checkpoint. Use it for
+conversational or local-file tasks. For sandbox tasks, prefer `/msg --task <id>` to
+inject direction without aborting.
 
 ## Project Structure
 
@@ -194,20 +228,55 @@ consider worth remembering.
 
 ### Team Formation
 
-When a large task arrives, the Orchestrator broadcasts it to idle beings. They discuss
-via the Agent Teams Mailbox, propose a team structure, and elect a leader. The
-Orchestrator formalizes the team (`world/memory/team/{id}.json`) and marks the leader.
+When a task arrives, the Orchestrator picks idle beings (creating new ones from
+`_template.md` if needed), elects a leader, and writes the assignment to
+`world/tasks/queue.json`. The scheduler detects the newly assigned task and starts
+a `TaskRunner`. Inside the runner, the Orchestrator spawns the leader via the `Task`
+tool; the leader then coordinates the team using further `Task` tool calls.
+See the Subagent Execution Model section in WORLD-DESIGN.md for the full execution tree.
 
 ### Human Meetup
 
-`npm run meetup` triggers a **global** freeze — all runners pause, you communicate
-with the Orchestrator, then `/done` resumes all.
+Meetup is the **only hard interrupt** — it calls `AbortController.abort()` on World Task
+runner(s). "Tasks" here always means **World Tasks** (one per `queue.json` entry, one
+`TaskRunner`). Sub-tasks are ephemeral `Task` tool calls inside the leader's context —
+they have no persistent session and are terminated together with their World Task runner.
 
-`npm run meetup -- --task <id>` triggers a **task-level** freeze — only that
-runner pauses. Other tasks keep running. Use `/msg --task <id> <message>` to send
-guidance, then `/done` to resume that runner.
+Safe for conversational or local-file tasks. For sandbox tasks (open ports, running
+processes), use `/msg --task <id>` soft injection instead (no abort).
+
+`npm run meetup` — **global** freeze: all World Task runners pause, communicate freely
+in the world terminal, `/done` resumes all.
+
+`npm run meetup -- --task <id>` — **task-level** freeze: only that World Task's runner
+pauses; other World Tasks keep running. `/msg --task <id> <message>` injects a message
+without aborting; `/done` resumes the paused runner.
+
+**Redirecting a task mid-run** — inject a message before `/done`:
+```
+/msg --task a1b2c3d4 Add being 'bram' to do a Chinese localization pass on the draft
+/done
+```
+The leader receives the message on resume, writes a checkpoint, acknowledges, then acts:
+spawning new beings, adding steps, changing scope — whatever the instruction says.
+The human can add beings, insert steps, change priority, or stop the task early.
+
+Global messages (typed without `/msg --task`) go to the global Orchestrator's assignment
+turn — useful for adding new tasks or changing world-level priorities.
+
+**On resume**, the runner re-enters `query()` with the World Task session ID saved in
+`world/sessions/tasks/{taskId}.json`. The leader is re-spawned as a fresh instance and
+reads `progress.json` to recover state. Any sub-task work not written to `progress.json`
+before the abort is lost — this is why the leader writes checkpoints at meaningful points.
 
 ### Being-Created Tools and Skills
+
+This is the **self-evolution mechanism** — the core philosophy of Vibe Guild.
+
+After completing a World Task, beings are encouraged to reflect: *"What did I do
+repeatedly? What knowledge should exist for the next being who faces a similar
+problem?"* The answer becomes a skill or tool — created by the being, shared with
+the world.
 
 Beings write tools (TypeScript MCP functions) and skills (`.md` files) into their own
 `world/beings/{id}/tools/` and `world/beings/{id}/skills/` folders. When a being
@@ -215,9 +284,15 @@ decides something is useful for everyone, it moves it to `world/shared/`. A sync
 daemon watches `world/shared/` and promotes tools to `src/tools/generated/` and skills
 to `.claude/skills/`, making them available to the whole world engine.
 
+Over time the world accumulates institutional knowledge that no single being had at
+the start. Tasks get easier. Beings build on each other's work. The world compounds.
+
+> This automation is planned (Phase 6), not yet running. But the intent shapes how
+> beings are instructed today: after every task, reflect and contribute.
+
 ## Stack
 
-- [Claude Agent SDK](https://code.claude.com/docs/en/sdk) (`@anthropic-ai/claude-agent-sdk`) — agent teams, MCP, session resumption
+- [Claude Agent SDK](https://code.claude.com/docs/en/sdk) (`@anthropic-ai/claude-agent-sdk`) — `query()` loop, `Task` tool (subagent tree), MCP, session resumption
 - TypeScript with ESM (`import`, never `require`)
 - `node-cron` — shift clock
 - `chokidar` — sync daemon (Phase 6)

@@ -10,24 +10,17 @@ let restTimer: ReturnType<typeof setTimeout> | null = null;
 let dayTimer: ReturnType<typeof setTimeout> | null = null;
 let running = false;
 
-// Callback registered by world loop — called when the clock wants to interrupt
-// the current query() turn (on rest start and day end).
-let interruptCallback: (() => void) | null = null;
-
-export const registerInterruptCallback = (cb: () => void): void => {
-  interruptCallback = cb;
-};
-
 const onRestStart = async (): Promise<void> => {
-  console.log(`\n⏸  [CLOCK] Rest period started — interrupting current turn for shift rest.`);
+  console.log(`\n⏸  [CLOCK] Rest period started — writing shift rest signal.`);
   await appendSignal('SHIFT_REST_START', { restDurationMs: REST_DURATION_MS });
-  interruptCallback?.();
+  // Runners are NOT interrupted. The soft signal is delivered via injectMessage
+  // in the next scheduler tick. Runners continue until they choose a checkpoint.
 };
 
 const onDayEnd = async (startNextCycle: () => void): Promise<void> => {
-  console.log(`\n🌅 [CLOCK] Day ended — interrupting current turn to write daily record.`);
+  console.log(`\n🌅 [CLOCK] Day ended — writing day-end signal.`);
   await appendSignal('SHIFT_DAY_END');
-  interruptCallback?.();
+  // Runners keep running. The engine writes daily record from observable state.
   if (running) {
     startNextCycle();
   }

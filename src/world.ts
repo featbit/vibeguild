@@ -28,13 +28,12 @@ import {
   startClock,
   triggerMeetupFreeze,
   triggerMeetupResume,
-  registerInterruptCallback,
 } from './scheduler/clock.js';
 import { createWorldMcpServer } from './tools/report.js';
 import type { WorldSignal } from './memory/types.js';
 import type { Task } from './tasks/types.js';
 
-// ─── Orchestrator turn (assignment + human messages only) ──────────────────── (assignment + human messages only) ────────────────────
+// ─── Orchestrator turn (assignment + human messages only) ────────────────────
 
 type OrchestratorContext = {
   pendingTasks: Task[];
@@ -119,50 +118,6 @@ const buildAssignmentPrompt = (ctx: OrchestratorContext): string => {
   return parts.join('\n');
 };
 
-// ─── Rest summaries (parallel, one query per being) ──────────────────────────
-
-const runRestSummaries = async (
-  beings: string[],
-  dayCount: number,
-  baseOptions: Record<string, unknown>,
-): Promise<void> => {
-  const { query } = await import('@anthropic-ai/claude-agent-sdk');
-  const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
-
-  console.log(`\n⏸  [World] Running shift summaries for ${beings.length} being(s) in parallel...`);
-
-  await Promise.all(
-    beings.map(async (id) => {
-      const prompt = [
-        `REST PERIOD — Day ${dayCount}.`,
-        `You are ${id}. Write your shift summary now.`,
-        ``,
-        `1. Write world/beings/${id}/memory/shifts/${ts}.json`,
-        `   Include: tasks you worked on, key decisions, what you learned, follow-ups needed.`,
-        `   If you did nothing this shift, still write an honest account.`,
-        `2. Write any self-notes worth keeping to world/beings/${id}/memory/self-notes/${ts}.json`,
-        ``,
-        `Do it now. No new tasks. Rest only.`,
-      ].join('\n');
-
-      try {
-        const opts = { ...baseOptions, maxTurns: 6 } as Parameters<typeof query>[0]['options'];
-        for await (const msg of query({ prompt, options: opts })) {
-          const m = msg as Record<string, unknown>;
-          if (m['result']) {
-            process.stdout.write(`\n⏸  [${id}] Shift summary written.\n`);
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`\n[RestSummary:${id}] Error: ${message}`);
-      }
-    }),
-  );
-
-  console.log(`\n⏸  [World] All shift summaries complete.`);
-};
-
 // ─── World Engine ─────────────────────────────────────────────────────────────
 
 const runWorldLoop = async (): Promise<void> => {
@@ -200,13 +155,6 @@ const runWorldLoop = async (): Promise<void> => {
   // ── Startup ──────────────────────────────────────────────────────────────
   await markWorldStarted();
   startClock();
-
-  // Clock interrupt: pause all runners at shift-rest / day-end boundary
-  registerInterruptCallback(() => {
-    for (const runner of activeRunners.values()) {
-      if (runner.isRunning) runner.pause();
-    }
-  });
 
   const initialBeings = await listBeings();
   const state = await readWorldState();
@@ -347,20 +295,30 @@ const runWorldLoop = async (): Promise<void> => {
       }
     }
 
-    // ── Rest start ────────────────────────────────────────────────────────
+    // ── Rest start (soft signal) ──────────────────────────────────────────
     const restSignal = signals.find((s) => s.type === 'SHIFT_REST_START');
     if (restSignal && !resting) {
       resting = true;
       void writeRuntimeState({ frozen, resting: true });
-      for (const runner of activeRunners.values()) {
-        if (runner.isRunning) runner.pause();
-      }
       const dayCount = (await readWorldState()).dayCount;
-      const beings = await listBeings();
-      if (beings.length > 0) {
-        await runRestSummaries(beings, dayCount, baseOptions);
+      const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+      const restMsg =
+        `REST PERIOD — Day ${dayCount}. ` +
+        `At your next convenient stopping point (between tool calls, not mid-operation): ` +
+        `(1) write a progress checkpoint to world/tasks/${'{taskId}'}/progress.json, ` +
+        `(2) write a shift summary to world/beings/${'{leaderId}'}/memory/shifts/${ts}.json. ` +
+        `Then CONTINUE your work — do NOT stop or wait.`;
+      let injected = 0;
+      for (const [taskId, runner] of activeRunners) {
+        const task = (await getAllTasks()).find((t) => t.id === taskId);
+        if (!task) continue;
+        const msg = restMsg
+          .replace('{taskId}', taskId)
+          .replace('{leaderId}', task.leaderId ?? task.assignedTo?.[0] ?? 'leader');
+        runner.injectMessage(msg);
+        injected++;
       }
-      console.log(`\n⏸  [World] Shift consolidation complete. Waiting for day end...`);
+      console.log(`\n⏸  [World] Rest signal sent to ${injected} active runner(s). Runners continue working.`);
     }
 
     // ── Day end ───────────────────────────────────────────────────────────
@@ -369,6 +327,7 @@ const runWorldLoop = async (): Promise<void> => {
       const worldState = await incrementDay();
       const today = new Date().toISOString().slice(0, 10);
       const allBeings = await listBeings();
+      // Collect beings that wrote a shift file today (best-effort, may lag slightly)
       const beingsWithShifts: string[] = [];
       for (const b of allBeings) {
         const shifts = await listTodayShifts(b, today);
@@ -387,22 +346,16 @@ const runWorldLoop = async (): Promise<void> => {
         keyEvents: [`Day ${worldState.dayCount} ended at ${new Date().toISOString()}`],
         writtenAt: new Date().toISOString(),
       });
+      // Runners were never paused — just clear the resting flag for status display
       if (resting) {
         resting = false;
         void writeRuntimeState({ frozen, resting: false });
-        console.log(`\n🌄 [World] New day ${worldState.dayCount + 1} starting — resuming work.`);
-        const tasks = await getAllTasks();
-        for (const [taskId, runner] of activeRunners) {
-          if (runner.isPaused && !frozenTaskIds.includes(taskId)) {
-            const task = tasks.find((t) => t.id === taskId);
-            if (task) runner.resume(task);
-          }
-        }
+        console.log(`\n🌄 [World] Day ${worldState.dayCount + 1} starting. Daily record written. Runners continue.`);
       }
     }
 
-    // ── Skip work during global freeze or rest period ─────────────────────
-    if (frozen || resting) return;
+    // ── Skip work only during a hard meetup freeze ────────────────────────
+    if (frozen) return;
 
     // ── Scaffold new being directories (idempotent) ───────────────────────
     const allBeings = await listBeings();
