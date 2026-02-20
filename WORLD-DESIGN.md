@@ -57,17 +57,60 @@ vibeguild/
     ├── shared/
     │   ├── tools/        tools validated and shared with the whole world
     │   └── skills/       skills shared across beings (synced → .claude/skills/)
-    ├── tasks/            shared task list (queue.json)
-    ├── sessions/         orchestrator.json — session ID for resumption
+    ├── tasks/
+    │   ├── queue.json        shared task list
+    │   └── {task-id}/
+    │       └── progress.json  leader writes after each milestone (+ checkpoints)
+    ├── sessions/
+    │   ├── orchestrator.json Orchestrator session ID for assignment turns
+    │   └── tasks/
+    │       └── {task-id}.json per-task session ID for runner resume
     └── reports/          escalations.json, meetup notes
 ```
 
 ## World Mechanics
 
+### World Engine (Parallel Scheduler)
+
+The core loop is a **5-second `setInterval` scheduler** (not a blocking `while(true)`).
+This allows multiple tasks to execute concurrently — each as an independent `TaskRunner`.
+
+```
+setInterval(5 s) tick():
+  1. drain world/signals.json
+  2. MEETUP_FREEZE {taskId?} → pause one runner or all runners
+  3. SHIFT_REST_START → pause all runners, run parallel shift summaries
+  4. SHIFT_DAY_END    → write daily record, resume all paused runners
+  5. newly assigned tasks not in registry → start new TaskRunner
+  6. in-progress tasks not in registry (crash recovery) → resume TaskRunner
+  7. pending tasks / human messages → short Orchestrator assignment turn
+```
+
+The Orchestrator is used **only for assignment** (short turns, `maxTurns: 10`).
+Task execution is handled entirely by `TaskRunner` instances.
+
+### TaskRunner
+
+One `TaskRunner` per active task. Each owns:
+- Its own `query()` call with a dedicated `AbortController`
+- A session ID persisted to `world/sessions/tasks/{id}.json` on every init message
+- A leader being responsible for progress reporting
+
+**Lifecycle:**
+```
+start()  → launch query(); write session; leader begins work
+pause()  → abort(); session already saved
+resume() → re-enter query() with saved sessionId; leader reads progress.json and continues
+```
+
+**Parallel execution:** the scheduler holds `Map<taskId, TaskRunner>` — all runners run
+concurrently as independent async Promises.
+
 ### Shift Clock (MVP: 10-min day)
 - 8 minutes work → 2 minutes rest → repeat
-- Rest period: every being writes shift summary to `world/beings/{id}/memory/shifts/`
-- Day end: daily record written to `world/memory/daily/`, world state incremented
+- Rest period: all runners are paused; each being writes its own shift summary via a
+  **parallel** `query()` (not a single blocking Orchestrator turn)
+- Day end: daily record written to `world/memory/daily/`, all runners resume
 - Production cadence: 25 min work + 5 min rest (30-min day)
 
 ### Memory Hierarchy
@@ -77,23 +120,55 @@ vibeguild/
 - **Daily/weekly/monthly**: automated rollups; weekly = summary of 7 daily records
 - **World record**: `world/memory/world.json` — cumulative history, completed projects
 
-### Being Pool (30 beings)
-- Defined in `.claude/agents/{id}.md` (filesystem agent format — loaded automatically)
-- All broadly capable; demonstrated history shapes assignment priority
-- Only beings with active tasks spin up as live teammates (token cost control)
-- After each task cycle, Orchestrator updates the being's `.md` description with new skills
+### Being Pool (dynamic, starts at zero)
+- **No fixed roster**. World starts empty; beings are created on demand by the Orchestrator.
+- Defined in `.claude/agents/{id}.md` (filesystem agent format — loaded automatically by Claude)
+- Tracked in `world/beings/{id}/profile.json`
+- Each being may only work on **one task at a time** — `getBusyBeings()` enforces this
+- Assignment strategy (every Orchestrator turn):
+  1. Assign free existing beings first
+  2. If more capacity is needed, Orchestrator creates new beings from `_template.md`
+  3. No upper limit — grow the pool whenever tasks demand it
+- The engine auto-scaffolds `memory/shifts/`, `memory/self-notes/` etc. for each new being
 
-### Team Formation + Leader Election
-1. Orchestrator broadcasts task to idle beings via Agent Teams Mailbox
-2. Beings discuss, propose team structure, nominate a leader
-3. Orchestrator formalizes: writes `world/memory/team/{id}.json`, updates being profiles
-4. Leader gets plan-approval authority for their team scope
+### Team Formation + Leader Pattern
+1. Orchestrator assigns a task: picks beings (creates new ones if needed), elects a **leader**
+2. Task is written to `world/tasks/queue.json` with `status: "assigned"`, `leaderId`, `assignedTo[]`
+3. Scheduler detects the newly assigned task → starts a `TaskRunner`
+4. The TaskRunner spawns the leader via the `Task` tool; leader coordinates the team
+5. **Leader responsibilities**:
+   - Coordinate sub-tasks via the Task tool (spawn other beings)
+   - Write `world/tasks/{id}/progress.json` after each milestone:
+     ```json
+     { "taskId": "...", "leaderId": "aria", "status": "in-progress",
+       "summary": "...", "percentComplete": 50,
+       "checkpoints": [{"at":"<ISO>","sessionId":"<id>","description":"..."}],
+       "lastUpdated": "..." }
+     ```
+   - On completion: set `status: "completed"` in progress.json, update queue.json
+6. Human can read `world/tasks/{id}/progress.json` anytime without interrupting the runner
+7. `npm run progress -- <taskId>` shows a formatted summary
 
 ### Human Meetup + Freeze
-- Scheduled (cron) or on-demand: `tsx src/world.ts meetup`
-- All beings complete current atomic action → freeze state snapshot → go idle
-- Human communicates with Orchestrator via terminal input loop
-- `/done` → Orchestrator broadcasts resume → beings reload freeze snapshot
+
+**Global meetup** — freeze all runners:
+```bash
+npm run meetup
+```
+All `TaskRunner` instances are paused (AbortController.abort()). Sessions are already
+persisted, so resume is instant. Type in the world terminal; type `/done` to resume all.
+
+**Task-level meetup** — freeze only one runner:
+```bash
+npm run meetup -- --task <taskId>
+```
+Only the named runner is paused. All other tasks keep running.
+Communicate via: `/msg --task <id> <message>` in the world terminal.
+Type `/done` to resume that runner only.
+
+**Resume-from-checkpoint**: on resume, the runner re-enters `query()` with the saved
+session ID. The leader reads `world/tasks/{id}/progress.json` and continues from the
+last written checkpoint — no work is lost.
 
 ### Being-Created Tools + Sync Daemon
 - Beings write tools to `world/beings/{id}/tools/` (private)
@@ -132,36 +207,30 @@ Orchestrator prompt when the task is assigned:
 
 The world-level `npm start` has no concurrency flag — limits are set per task, not per world.
 
-### Error Recovery (Retry + Backoff)
+### Error Recovery
 
-Every world turn is wrapped in a retry loop with exponential backoff. Only errors that look like transient infrastructure failures trigger retries; logic errors are skipped immediately.
+**Runner crash**: if a TaskRunner's `query()` throws a non-abort error, the runner marks
+itself `failed` and is removed from the active registry. Its session is already persisted —
+the scheduler will detect the `in-progress` task without a runner on the next tick and
+recover it automatically.
 
-| Error type | Detection pattern | Behaviour |
-|------------|-------------------|-----------|
-| Timeout / rate limit / overload | `timeout`, `timed out`, `rate limit`, `overload`, `529`, `503`, `ECONNRESET`, `socket` | Retry up to 3 times with exponential backoff |
-| Any other error | everything else | Skip turn immediately, no retry |
+**Crash recovery on startup**: the engine scans `world/tasks/queue.json` for any
+`in-progress` tasks and creates `TaskRunner` instances for them before the first scheduler
+tick. They resume from the saved session in `world/sessions/tasks/{id}.json`.
 
-Backoff schedule (base delay 10 s):
-
-| Attempt | Delay before retry |
-|---------|--------------------|
-| 1 → 2   | 10 s |
-| 2 → 3   | 20 s |
-| 3 → fail | 40 s then give up |
-
-After exhausting retries (or for non-retryable errors), the engine logs the failure, waits 15 s, and moves on to the next world turn. The world never crashes — a bad turn is recorded and the clock keeps running.
+**Orphaned tasks**: tasks stuck `in-progress` with no session file are restarted fresh
+(treated as first run).
 
 ## Implementation Phases
 
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 0 | Project foundation + folder skeleton | done |
-| 1 | Multi-horizon memory store (`src/memory/`) | in progress |
-| 2 | Shift clock (`src/scheduler/clock.ts`) — 10-min MVP | in progress |
-| 3 | Being pool (`3` MVP beings) + Orchestrator (`src/world.ts`) | in progress |
-| 4 | Human meetup + freeze mechanism | planned |
-| 5 | Task system + team formation + leader election | planned |
-| 6 | Being pool expansion to 30 | planned |
-| 7 | Being-created tools/skills + sync daemon | planned |
-| 8 | Built-in MCP tools (HN, Reddit, ingest, report) | planned |
-| 9 | FeatBit domain knowledge + content pipeline | planned |
+| 1 | Multi-horizon memory store (`src/memory/`) | done |
+| 2 | Shift clock (`src/scheduler/clock.ts`) — 10-min MVP | done |
+| 3 | Dynamic being pool (starts at zero) + Orchestrator | done |
+| 4 | Human meetup + freeze (global + task-level) | done |
+| 5 | Parallel task execution — `TaskRunner` + leader + progress checkpoints | done |
+| 6 | Being-created tools/skills + sync daemon | planned |
+| 7 | Built-in MCP tools (HN, Reddit, ingest, report) | planned |
+| 8 | FeatBit domain knowledge + content pipeline | planned |

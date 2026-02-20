@@ -25,9 +25,13 @@ world/memory/project/*
 world/memory/team/*
 !world/memory/team/.gitkeep
 
-# Sessions — ignore json files, keep folder via .gitkeep
+# Sessions — ignore json files, keep folders via .gitkeep
 world/sessions/*
 !world/sessions/.gitkeep
+# task sessions live in a subdirectory — keep its .gitkeep
+!world/sessions/tasks/
+world/sessions/tasks/*
+!world/sessions/tasks/.gitkeep
 
 # Reports — ignore json files, keep folder via .gitkeep
 world/reports/*

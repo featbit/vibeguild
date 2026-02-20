@@ -28,8 +28,12 @@ everything else is issued from a second terminal.
 npm start
 ```
 
-This runs the Orchestrator in an infinite loop. The world keeps running until you stop it (`Ctrl+C`).
-Keep this terminal open — all being activity and `[ESCALATION]` markers print here.
+This starts the world scheduler (ticks every 5 s). The scheduler:
+- Starts a parallel `TaskRunner` for every assigned task
+- Runs a lightweight Orchestrator turn when pending tasks need assignment
+- Handles rest/day-end and meetup signals without blocking running tasks
+
+Keep this terminal open — all being and runner output prints here.
 
 ### Check world status
 
@@ -56,8 +60,9 @@ npm run task -- "Summarise this week's HN posts about feature flags" --max-being
 npm run task -- "Write a blog post draft on progressive delivery" --max-beings 2
 ```
 
-The task lands in `world/tasks/queue.json`. The Orchestrator picks it up on its next
-turn — the world does not respond immediately.
+The task lands in `world/tasks/queue.json`. On the next scheduler tick (≤5 s), the
+Orchestrator assigns it (picking a leader + team), then the engine starts a dedicated
+`TaskRunner` for it. Multiple tasks run in parallel — each has its own session.
 
 Options:
 | Flag | Values | Default | Description |
@@ -66,28 +71,45 @@ Options:
 | `--plan` | — | off | Require plan approval from human before execution |
 | `--max-beings` | `1`, `2`, `3`… | unlimited | Max beings the Orchestrator may activate for this task. Use `1` or `2` to limit concurrent LLM calls when your model has rate/concurrency constraints. |
 
+### Check task progress
+
+```bash
+npm run progress -- <taskId>    # full or short (prefix) ID
+```
+
+Reads `world/tasks/{id}/progress.json` — written by the task leader after each
+milestone. Shows leader, status, percent complete, summary, and checkpoints.
+
 ### Schedule a meetup (freeze + talk)
 
+**Global freeze — all runners pause:**
 ```bash
 npm run meetup
 ```
 
-Sends a freeze signal. On its next turn, the Orchestrator suspends all beings (they
-each write a state snapshot). Switch to the `npm start` terminal and type freely — the
-Orchestrator will see your messages. When finished:
+Switching to the `npm start` terminal, type freely. When finished:
 
 ```
 /done
 ```
 
-Beings resume from exactly where they stopped.
+All runners resume from exactly where they stopped (session IDs are persisted).
 
-You can also inject commands inline during a meetup or at any time in the world terminal:
+**Task-level freeze — pause only one task:**
+```bash
+npm run meetup -- --task <taskId>   # full or prefix ID
+```
+
+Only that task's runner pauses. Other tasks continue running uninterrupted.
+In the world terminal: `/msg --task <id> <message>`, then `/done` to resume.
+
+Terminal commands available at any time in the `npm start` window:
 
 | Input | Effect |
 |-------|--------|
-| `/done` or `/resume` | End meetup, resume all beings |
+| `/done` or `/resume` | End meetup (global or task), resume runner(s) |
 | `/task <description>` | Add a task directly from the world terminal |
+| `/msg --task <id> <message>` | Send a message to a specific task runner |
 | Any other text | Queued as a human message to the Orchestrator |
 
 ### Check escalations
@@ -104,16 +126,26 @@ cat world/reports/escalations.json                              # bash/zsh
 
 ## How the World Runs
 
-The world runs on a continuous clock. Each "day" is a fixed time window.
+The world runs on a 5-second scheduler loop. Each "day" is a fixed real-time window.
 MVP cadence: **8 minutes work + 2 minutes rest = 10 minutes per day**.
 
+Inside the scheduler each tick:
+1. Drain signals (rest, day-end, meetup, task-added)
+2. Start a `TaskRunner` for every newly assigned task — tasks run **in parallel**
+3. Run a short Orchestrator turn only when there are pending tasks or human messages
+
+Each `TaskRunner` owns an independent `query()` session. The session ID is written
+to `world/sessions/tasks/{taskId}.json` on every init message, enabling seamless
+resume after rest periods or crashes.
+
 At rest time:
-- Every being writes a shift summary of what it did and what it learned
-- The world updates its daily memory record
+- All runners are paused (AbortController)
+- Every being runs a parallel shift-summary turn (writes `world/beings/{id}/memory/shifts/`)
+- The scheduler waits for day-end before resuming runners
 
 At the end of each day:
-- Daily records roll up into weekly and monthly summaries
-- Escalations (things requiring human attention) are flushed to `world/reports/`
+- The engine writes `world/memory/daily/{date}.json`
+- All paused runners resume from their last saved session checkpoint
 
 ## Project Structure
 
@@ -168,9 +200,12 @@ Orchestrator formalizes the team (`world/memory/team/{id}.json`) and marks the l
 
 ### Human Meetup
 
-`npm run meetup` triggers a world freeze. All beings complete their current
-atomic action, write a state snapshot, and go idle. You communicate with the
-Orchestrator in the terminal. Type `/done` and work resumes from exactly where it stopped.
+`npm run meetup` triggers a **global** freeze — all runners pause, you communicate
+with the Orchestrator, then `/done` resumes all.
+
+`npm run meetup -- --task <id>` triggers a **task-level** freeze — only that
+runner pauses. Other tasks keep running. Use `/msg --task <id> <message>` to send
+guidance, then `/done` to resume that runner.
 
 ### Being-Created Tools and Skills
 

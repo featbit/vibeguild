@@ -15,455 +15,468 @@ import {
   createBeingDirectories,
   readEscalations,
 } from './memory/store.js';
-import { enqueueTask, getPendingTasks, getTaskSummary, getBusyBeings } from './tasks/queue.js';
-import { startClock, triggerMeetupFreeze, triggerMeetupResume, registerInterruptCallback } from './scheduler/clock.js';
+import {
+  enqueueTask,
+  getPendingTasks,
+  getTasksByStatus,
+  getTaskSummary,
+  getBusyBeings,
+  getAllTasks,
+} from './tasks/queue.js';
+import { TaskRunner } from './tasks/runner.js';
+import {
+  startClock,
+  triggerMeetupFreeze,
+  triggerMeetupResume,
+  registerInterruptCallback,
+} from './scheduler/clock.js';
 import { createWorldMcpServer } from './tools/report.js';
 import type { WorldSignal } from './memory/types.js';
+import type { Task } from './tasks/types.js';
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
+// ─── Orchestrator turn (assignment + human messages only) ──────────────────── (assignment + human messages only) ────────────────────
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
-
-type RetryOptions = {
-  maxAttempts?: number;
-  baseDelayMs?: number;
-  label?: string;
-};
-
-/**
- * Retries an async function with exponential backoff.
- * Only retries on errors that look like timeouts or rate limits.
- * All other errors are rethrown immediately after logging.
- */
-const withRetry = async <T>(
-  fn: () => Promise<T>,
-  { maxAttempts = 3, baseDelayMs = 10_000, label = 'operation' }: RetryOptions = {},
-): Promise<T> => {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (err) {
-      attempt++;
-      const message = err instanceof Error ? err.message : String(err);
-      const isRetryable = /timeout|timed.?out|rate.?limit|overload|529|503|econnreset|socket/i.test(message);
-      if (!isRetryable || attempt >= maxAttempts) {
-        if (attempt > 1) {
-          console.error(`\n[World] ${label} failed after ${attempt} attempt(s): ${message}\n`);
-        }
-        throw err;
-      }
-      const delayMs = baseDelayMs * Math.pow(2, attempt - 1); // 10s → 20s → 40s
-      console.error(
-        `\n[World] ${label} error (attempt ${attempt}/${maxAttempts}): ${message}` +
-        `\n        Retrying in ${delayMs / 1000}s (exponential backoff)...\n`,
-      );
-      await sleep(delayMs);
-    }
-  }
-};
-
-// ─── prompt builder ───────────────────────────────────────────────────────────
-
-type PromptContext = {
-  isFirstRun: boolean;
-  dayCount: number;
-  signals: WorldSignal[];
-  pendingTasks: import('./tasks/types.js').Task[];
+type OrchestratorContext = {
+  pendingTasks: Task[];
   humanMessages: string[];
   allBeings: string[];
   busyBeings: string[];
+  isFirstRun: boolean;
+  dayCount: number;
+  signals: WorldSignal[];
 };
 
-const buildOrchestratorPrompt = (ctx: PromptContext): string => {
+const buildAssignmentPrompt = (ctx: OrchestratorContext): string => {
   const parts: string[] = [];
 
   if (ctx.isFirstRun) {
     parts.push(
-      `You are the Orchestrator of Vibe Guild. The world is starting up for the first time.`,
-      `Review the world memory at \`world/memory/world.json\` and the task queue at \`world/tasks/queue.json\`.`,
-      `Check if any beings exist in \`world/beings/\` yet. If no beings have profiles, this is a fresh world.`,
-      `Greet the three beings (Aria, Bram, Cleo) and orient them: explain what Vibe Guild does and what the first task will be.`,
-      `If there is a pending task in the queue, assign it to an appropriate team of beings.`,
+      `You are the Orchestrator of Vibe Guild. The world is starting up.`,
+      `Check world/memory/world.json and world/tasks/queue.json.`,
+      `The being pool is empty — create beings as needed to handle tasks.`,
     );
   } else {
-    parts.push(`Continuing Vibe Guild operations. Day ${ctx.dayCount}.`);
+    parts.push(`Vibe Guild — Day ${ctx.dayCount}. Assignment turn.`);
   }
 
-  if (ctx.signals.length > 0) {
-    parts.push(`\n--- PENDING WORLD SIGNALS (process these immediately) ---`);
-    for (const signal of ctx.signals) {
-      parts.push(`• ${signal.type}: ${JSON.stringify(signal.payload ?? {})}`);
-    }
-    parts.push(`---`);
-    parts.push(
-      `Handle each signal before other work:`,
-      `• SHIFT_REST_START → broadcast rest signal to active teammates, instruct them to write shift summaries`,
-      `• SHIFT_DAY_END → ensure beings have completed rest tasks, write daily record to world/memory/daily/, announce new day`,
-      `• MEETUP_FREEZE → broadcast freeze to all teammates, confirm they are suspended, await further human messages`,
-      `• MEETUP_RESUME → broadcast resume to all teammates`,
-    );
+  // Being pool
+  const free = ctx.allBeings.filter((b) => !ctx.busyBeings.includes(b));
+  parts.push(`\n--- BEING POOL ---`);
+  parts.push(`All beings: ${ctx.allBeings.length > 0 ? ctx.allBeings.join(', ') : 'none yet (will be created as needed)'}`);
+  if (ctx.busyBeings.length > 0) {
+    parts.push(`Busy (already on a task — do NOT assign more): ${ctx.busyBeings.join(', ')}`);
   }
+  parts.push(`Free now: ${free.length > 0 ? free.join(', ') : 'none'}`);
+  parts.push(``);
+  parts.push(`ASSIGNMENT STRATEGY:`);
+  parts.push(`  1. Use free beings first.`);
+  parts.push(`  2. If not enough free beings, CREATE new ones from .claude/agents/_template.md.`);
+  parts.push(`  3. No upper limit. Each being may only work on ONE task at a time.`);
+  parts.push(``);
+  parts.push(`CREATE NEW BEING (3 steps):`);
+  parts.push(`  a. Pick a lowercase name (dana, evan, felix, grace…).`);
+  parts.push(`  b. Copy .claude/agents/_template.md → fill placeholders → save as .claude/agents/{name}.md.`);
+  parts.push(`  c. Write world/beings/{name}/profile.json: { id, name, role, description, skills[], status:"idle", createdAt }.`);
+  parts.push(`RULE: one task per being at a time.`);
+  parts.push(`---`);
 
-  // Always show being pool so Orchestrator can make assignment decisions
-  {
-    const free = ctx.allBeings.filter((b) => !ctx.busyBeings.includes(b));
-    parts.push(`\n--- BEING POOL ---`);
-    parts.push(`All beings: ${ctx.allBeings.length > 0 ? ctx.allBeings.join(', ') : 'none yet'}`);
-    if (ctx.busyBeings.length > 0) {
-      parts.push(`Busy (already on a task — do NOT assign more work): ${ctx.busyBeings.join(', ')}`);
-    }
-    parts.push(`Free (available now): ${free.length > 0 ? free.join(', ') : 'none'}`);
-    parts.push(``);
-    parts.push(`ASSIGNMENT STRATEGY (follow in order):`);
-    parts.push(`  1. Assign free existing beings to new tasks first.`);
-    parts.push(`  2. If a task needs more beings than are currently free, CREATE new beings for the remainder.`);
-    parts.push(`  3. There is NO upper limit on beings. Grow the pool whenever needed.`);
-    parts.push(``);
-    parts.push(`HOW TO CREATE A NEW BEING (do all 3 steps before assigning them):`);
-    parts.push(`  a. Choose a lowercase name (e.g. dana, evan, felix, grace…).`);
-    parts.push(`  b. Read \`.claude/agents/_template.md\` — copy it, fill in all {PLACEHOLDERS} for their role, save to \`.claude/agents/{name}.md\`.`);
-    parts.push(`  c. Write \`world/beings/{name}/profile.json\` with: id, name, role, description, skills[], status:"idle", createdAt.`);
-    parts.push(`     (The engine auto-creates the directory skeleton when it detects a new profile.json.)`);
-    parts.push(`RULE: Each being may only work on ONE task at a time.`);
-    parts.push(`---`);
-  }
-
+  // Pending tasks
   if (ctx.pendingTasks.length > 0) {
-    parts.push(`\n--- TASK QUEUE STATUS ---`);
-    parts.push(`There are ${ctx.pendingTasks.length} pending task(s) awaiting assignment:`);
+    parts.push(`\n--- PENDING TASKS TO ASSIGN ---`);
     for (const t of ctx.pendingTasks) {
-      const cap = t.maxBeings !== undefined
-        ? ` [MAX BEINGS: ${t.maxBeings} — hard limit, sequence work rather than parallelise]`
-        : '';
+      const cap = t.maxBeings !== undefined ? ` [MAX ${t.maxBeings} beings]` : '';
       parts.push(`• [${t.priority.toUpperCase()}] ${t.id.slice(0, 8)} — ${t.title}${cap}`);
     }
     parts.push(
-      `Read \`world/tasks/queue.json\` for full details and assign tasks to available beings only.`,
-      `Respect each task's MAX BEINGS limit if set — do NOT spawn more teammates than allowed for that task.`,
+      `Read world/tasks/queue.json for full task details.`,
+      `For each pending task:`,
+      `  1. Choose the right beings (create if needed).`,
+      `  2. Pick ONE being as leader — they will coordinate + write progress.json.`,
+      `  3. Update the task in world/tasks/queue.json: set status="assigned", leaderId="...", assignedTo=[...].`,
+      `  The engine will automatically start a TaskRunner for each assigned task.`,
       `---`,
     );
   }
 
+  // Human messages
   if (ctx.humanMessages.length > 0) {
     parts.push(`\n--- MESSAGES FROM HUMAN OPERATOR ---`);
-    for (const msg of ctx.humanMessages) {
-      parts.push(`> ${msg}`);
-    }
-    parts.push(
-      `---`,
-      `Respond to the human operator's messages. If they give new tasks, add them to the queue and assign them.`,
-    );
+    for (const msg of ctx.humanMessages) parts.push(`> ${msg}`);
+    parts.push(`---`, `Respond and act on these messages. Add new tasks to queue if instructed.`);
   }
 
-  if (parts.length === (ctx.isFirstRun ? 5 : 1) && ctx.pendingTasks.length === 0 && ctx.humanMessages.length === 0) {
-    // No special signals or messages — just continue normal work
-    parts.push(
-      `Continue coordinating the team's work.`,
-      `Check \`world/tasks/queue.json\` for any pending tasks needing assignment.`,
-      `Check on active teammates via their shift summaries in \`world/beings/*/memory/shifts/\`.`,
-      `If a being has been idle for too long without a task, assign them something from the backlog.`,
-      `Escalate anything requiring human attention using the escalateToHuman tool (or Write to \`world/reports/escalations.json\`).`,
-    );
+  // Other signals
+  const relevantSignals = ctx.signals.filter(
+    (s) => !['MEETUP_FREEZE', 'SHIFT_REST_START', 'SHIFT_DAY_END'].includes(s.type),
+  );
+  if (relevantSignals.length > 0) {
+    parts.push(`\n--- OTHER SIGNALS ---`);
+    for (const s of relevantSignals) {
+      parts.push(`• ${s.type}: ${JSON.stringify(s.payload ?? {})}`);
+    }
   }
 
   return parts.join('\n');
 };
 
-// ─── message handler ──────────────────────────────────────────────────────────
+// ─── Rest summaries (parallel, one query per being) ──────────────────────────
 
-type SdkMessage = {
-  type?: string;
-  subtype?: string;
-  session_id?: string;
-  result?: string;
-  content?: Array<{ type: string; text?: string }>;
-};
-
-const handleMessage = async (
-  msg: unknown,
-  onSessionId: (id: string) => void,
+const runRestSummaries = async (
+  beings: string[],
+  dayCount: number,
+  baseOptions: Record<string, unknown>,
 ): Promise<void> => {
-  const m = msg as SdkMessage;
+  const { query } = await import('@anthropic-ai/claude-agent-sdk');
+  const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
 
-  // Capture session ID from init message
-  if (m.type === 'system' && m.subtype === 'init' && m.session_id) {
-    onSessionId(m.session_id);
-    return;
-  }
+  console.log(`\n⏸  [World] Running shift summaries for ${beings.length} being(s) in parallel...`);
 
-  // Print assistant text to stdout
-  if (m.type === 'assistant' && Array.isArray(m.content)) {
-    for (const block of m.content) {
-      if (block.type === 'text' && block.text) {
-        process.stdout.write(`\n[Orchestrator] ${block.text}\n`);
+  await Promise.all(
+    beings.map(async (id) => {
+      const prompt = [
+        `REST PERIOD — Day ${dayCount}.`,
+        `You are ${id}. Write your shift summary now.`,
+        ``,
+        `1. Write world/beings/${id}/memory/shifts/${ts}.json`,
+        `   Include: tasks you worked on, key decisions, what you learned, follow-ups needed.`,
+        `   If you did nothing this shift, still write an honest account.`,
+        `2. Write any self-notes worth keeping to world/beings/${id}/memory/self-notes/${ts}.json`,
+        ``,
+        `Do it now. No new tasks. Rest only.`,
+      ].join('\n');
+
+      try {
+        const opts = { ...baseOptions, maxTurns: 6 } as Parameters<typeof query>[0]['options'];
+        for await (const msg of query({ prompt, options: opts })) {
+          const m = msg as Record<string, unknown>;
+          if (m['result']) {
+            process.stdout.write(`\n⏸  [${id}] Shift summary written.\n`);
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n[RestSummary:${id}] Error: ${message}`);
       }
-    }
-    return;
-  }
+    }),
+  );
 
-  // Print final result
-  if (m.result) {
-    process.stdout.write(`\n[World] Turn complete.\n`);
-  }
+  console.log(`\n⏸  [World] All shift summaries complete.`);
 };
 
-// ─── world loop ───────────────────────────────────────────────────────────────
+// ─── World Engine ─────────────────────────────────────────────────────────────
 
 const runWorldLoop = async (): Promise<void> => {
   const { query } = await import('@anthropic-ai/claude-agent-sdk');
 
-  let sessionId = await readSessionId();
-  let isFirstRun = !sessionId;
-  const humanMessages: string[] = [];
-  let frozen = false;
-  let resting = false; // true during SHIFT_REST_START → SHIFT_DAY_END gap
+  // ── State ────────────────────────────────────────────────────────────────
+  const activeRunners = new Map<string, TaskRunner>();
+  let orchestratorSessionId = await readSessionId();
+  let isFirstRun = !orchestratorSessionId;
+  const globalHumanMessages: string[] = [];
+  // Tasks frozen by a task-level meetup (not globally frozen)
+  const frozenTaskIds: string[] = [];
+  let frozen = false;    // true during global meetup
+  let resting = false;   // true between SHIFT_REST_START and SHIFT_DAY_END
+  let schedulerBusy = false;
 
-  // AbortController for the current query() call.
-  // Replaced each turn; abort() is called by the clock or meetup freeze.
-  let currentAbort: AbortController | null = null;
-
-  const interruptCurrentTurn = (): void => {
-    if (currentAbort && !currentAbort.signal.aborted) {
-      console.log(`\n✋ [World] Interrupting current turn (clock or freeze signal).`);
-      currentAbort.abort();
-    }
+  // Shared base options for all query() calls
+  const mcpServer = await createWorldMcpServer();
+  const baseOptions: Record<string, unknown> = {
+    allowedTools: ['Read', 'Write', 'Bash', 'Task', 'WebSearch', 'WebFetch'],
+    settingSources: ['project'],
+    permissionMode: 'bypassPermissions',
+    ...(process.env.ANTHROPIC_MODEL_ID ? { model: process.env.ANTHROPIC_MODEL_ID } : {}),
+    ...(mcpServer ? { mcpServers: { 'vibe-guild-world-tools': mcpServer } } : {}),
   };
 
-  registerInterruptCallback(interruptCurrentTurn);
+  // Options for TaskRunner instances
+  const runnerOpts = {
+    mcpServer,
+    modelId: process.env.ANTHROPIC_MODEL_ID,
+    onComplete: (taskId: string) => { activeRunners.delete(taskId); },
+    onError: (taskId: string) => { activeRunners.delete(taskId); },
+  };
 
+  // ── Startup ──────────────────────────────────────────────────────────────
   await markWorldStarted();
   startClock();
 
-  console.log(`\n🌍 Vibe Guild is alive. Day ${(await readWorldState()).dayCount + 1} starting.`);
-  console.log(`   Beings: Aria (researcher), Bram (strategist), Cleo (writer)`);
+  // Clock interrupt: pause all runners at shift-rest / day-end boundary
+  registerInterruptCallback(() => {
+    for (const runner of activeRunners.values()) {
+      if (runner.isRunning) runner.pause();
+    }
+  });
+
+  const initialBeings = await listBeings();
+  const state = await readWorldState();
+  console.log(`\n🌍 Vibe Guild is alive. Day ${state.dayCount + 1} starting.`);
+  console.log(`   Beings: ${initialBeings.length > 0 ? initialBeings.join(', ') : 'none yet (will be created as needed)'}`);
   console.log(`   Shift: 8 min work → 2 min rest = 10 min day\n`);
 
-  // Load optional in-process MCP server for custom tools
-  const mcpServer = await createWorldMcpServer();
+  // ── Recover in-progress tasks from a previous run ────────────────────────
+  {
+    const savedTasks = await getAllTasks();
+    const recovering = savedTasks.filter((t) => t.status === 'in-progress' && t.assignedTo?.length);
+    for (const task of recovering) {
+      console.log(`\n♻️  [World] Recovering task ${task.id.slice(0, 8)}: "${task.title}"`);
+      const runner = new TaskRunner(task, runnerOpts);
+      activeRunners.set(task.id, runner);
+      void runner.start(task);
+    }
+  }
 
-  // Listen for stdin input (human operator messages during freeze or anytime)
+  // ── Stdin (human operator) ───────────────────────────────────────────────
   process.stdin.resume();
   const stdinRl = createInterface({ input: process.stdin });
   stdinRl.on('line', (line) => {
     const input = line.trim();
     if (!input) return;
 
+    // /done or /resume — end meetup
     if (input === '/done' || input === '/resume') {
-      frozen = false;
-      void writeRuntimeState({ frozen: false, resting });
-      void triggerMeetupResume();
-      console.log(`\n▶️  Meetup ended. Beings resuming work.\n`);
+      if (frozenTaskIds.length > 0) {
+        // Resume task-specific frozen runners
+        void (async () => {
+          const tasks = await getAllTasks();
+          for (const taskId of frozenTaskIds.splice(0)) {
+            const runner = activeRunners.get(taskId);
+            const task = tasks.find((t) => t.id === taskId);
+            if (runner && task) runner.resume(task);
+          }
+          console.log(`\n▶️  Task meetup ended. Runner(s) resuming.\n`);
+        })();
+      } else {
+        frozen = false;
+        void writeRuntimeState({ frozen: false, resting });
+        void triggerMeetupResume();
+        void (async () => {
+          const tasks = await getAllTasks();
+          for (const [taskId, runner] of activeRunners) {
+            if (runner.isPaused && !frozenTaskIds.includes(taskId)) {
+              const task = tasks.find((t) => t.id === taskId);
+              if (task) runner.resume(task);
+            }
+          }
+          console.log(`\n▶️  Global meetup ended. All beings resuming work.\n`);
+        })();
+      }
       return;
     }
 
+    // /task <desc> — quick-add task from terminal
     if (input.startsWith('/task ')) {
-      const description = input.slice(6).trim();
-      void enqueueTask({ title: description, description, createdBy: 'human' }).then((task) => {
+      const desc = input.slice(6).trim();
+      void enqueueTask({ title: desc, description: desc, createdBy: 'human' }).then((task) => {
         console.log(`\n📋 Task added: ${task.id}\n`);
         void appendSignal('TASK_ADDED', { taskId: task.id });
       });
       return;
     }
 
-    // Human message injected into world
-    humanMessages.push(input);
-    if (!frozen) {
-      console.log(`\n💬 Message queued for Orchestrator (will inject on next turn)\n`);
-    } else {
-      console.log(`\n💬 Orchestrator will see this message\n`);
-    }
-  });
-
-  // ─── base query options (static, built once) ────────────────────────────────
-  const baseQueryOptions: Record<string, unknown> = {
-    allowedTools: ['Read', 'Write', 'Bash', 'Task', 'WebSearch', 'WebFetch'],
-    settingSources: ['project'],
-    permissionMode: 'bypassPermissions',
-    ...(process.env.ANTHROPIC_MODEL_ID ? { model: process.env.ANTHROPIC_MODEL_ID } : {}),
-  };
-  if (mcpServer) {
-    baseQueryOptions.mcpServers = { 'vibe-guild-world-tools': mcpServer };
-  }
-
-  // Build full options for a query call — adds dynamic resume + per-call overrides.
-  const buildQueryOptions = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
-    ...baseQueryOptions,
-    ...(sessionId ? { resume: sessionId } : {}),
-    ...overrides,
-  });
-
-  // ─── rest turn prompt ──────────────────────────────────────────────────────
-  // Runs immediately after SHIFT_REST_START. Orchestrator instructs all beings
-  // to write shift summaries and self-notes. This is the "dream consolidation"
-  // phase — beings process what happened and commit it to memory files.
-  const buildRestPrompt = (dayCount: number, beings: string[]): string => {
-    const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
-    const taskBlocks = beings.map((id) => [
-      `Task for ${id}:`,
-      `  "REST PERIOD — Write your shift summary for Day ${dayCount} to:`,
-      `  world/beings/${id}/memory/shifts/${ts}.json`,
-      `  Include: what tasks you worked on, key decisions, what you learned, follow-ups needed.`,
-      `  Also write any self-notes worth keeping to world/beings/${id}/memory/self-notes/${ts}.json`,
-      `  If you did nothing this shift, still write the file with an honest account. Do it now."`,
-    ].join('\n'));
-    return [
-      `SHIFT REST PERIOD — Day ${dayCount}. Work period is over. No new tasks.`,
-      ``,
-      `You MUST now use the Task tool to spawn a separate Task call for EACH being listed below.`,
-      `Do not batch multiple beings into one Task call. Each being writes their own summary independently.`,
-      ``,
-      ...taskBlocks.flatMap((block) => [block, '']),
-      `Spawn all ${beings.length} Task calls now. Wait for all to complete. Then you are done.`,
-    ].join('\n');
-  };
-
-  // Main world loop
-  while (true) {
-    if (frozen) {
-      await sleep(1000);
-      continue;
+    // /msg --task <id> <message> — inject message into a specific runner
+    const taskMsgMatch = input.match(/^\/msg --task ([a-f0-9-]+) (.+)$/);
+    if (taskMsgMatch) {
+      const [, taskId, msg] = taskMsgMatch;
+      const runner = activeRunners.get(taskId);
+      if (runner) {
+        runner.injectMessage(msg);
+        console.log(`\n💬 Message queued for task ${taskId.slice(0, 8)}\n`);
+      } else {
+        // Try prefix match
+        const fullId = [...activeRunners.keys()].find((id) => id.startsWith(taskId));
+        if (fullId) {
+          activeRunners.get(fullId)!.injectMessage(msg);
+          console.log(`\n💬 Message queued for task ${fullId.slice(0, 8)}\n`);
+        } else {
+          console.log(`\n⚠️  No active runner for task ${taskId.slice(0, 8)}\n`);
+        }
+      }
+      return;
     }
 
+    // Default: global human message → next Orchestrator assignment turn
+    globalHumanMessages.push(input);
+    console.log(`\n💬 Message queued for Orchestrator (next assignment tick)\n`);
+  });
+
+  // ── Scheduler tick (every 5 s) ───────────────────────────────────────────
+  const tick = async (): Promise<void> => {
+    if (schedulerBusy) return;
+    schedulerBusy = true;
+    try { await processTick(); }
+    finally { schedulerBusy = false; }
+  };
+
+  const processTick = async (): Promise<void> => {
     const signals = await drainPendingSignals();
 
-    // Handle freeze signal
-    const freezeSignal = signals.find((s) => s.type === 'MEETUP_FREEZE');
-    if (freezeSignal) {
+    // ── Global meetup freeze ──────────────────────────────────────────────
+    const globalFreeze = signals.find(
+      (s) => s.type === 'MEETUP_FREEZE' && !(s.payload as Record<string, unknown>)?.['taskId'],
+    );
+    if (globalFreeze) {
       frozen = true;
       void writeRuntimeState({ frozen: true, resting });
-      interruptCurrentTurn();
-      console.log(`\n❄️  World frozen for meetup. Type your messages. Type /done to resume.\n`);
+      for (const runner of activeRunners.values()) {
+        if (runner.isRunning) runner.pause();
+      }
+      console.log(`\n❄️  World frozen for global meetup.`);
+      console.log(`   Type messages in this terminal. Type /done to resume.\n`);
     }
 
-    // Handle rest start — run a dedicated rest turn so beings write summaries
+    // ── Task-level meetup freeze ──────────────────────────────────────────
+    const taskFreeze = signals.find(
+      (s) => s.type === 'MEETUP_FREEZE' && (s.payload as Record<string, unknown>)?.['taskId'],
+    );
+    if (taskFreeze) {
+      const taskId = (taskFreeze.payload as Record<string, unknown>)['taskId'] as string;
+      // Support short IDs
+      const fullId = activeRunners.has(taskId)
+        ? taskId
+        : [...activeRunners.keys()].find((id) => id.startsWith(taskId));
+      if (fullId) {
+        const runner = activeRunners.get(fullId)!;
+        if (runner.isRunning) runner.pause();
+        frozenTaskIds.push(fullId);
+        console.log(`\n❄️  Task ${fullId.slice(0, 8)} frozen.`);
+        console.log(`   Use: /msg --task ${fullId.slice(0, 8)} <message>`);
+        console.log(`   Type /done to resume.\n`);
+      } else {
+        console.log(`\n⚠️  Freeze requested for unknown task: ${taskId}\n`);
+      }
+    }
+
+    // ── Rest start ────────────────────────────────────────────────────────
     const restSignal = signals.find((s) => s.type === 'SHIFT_REST_START');
     if (restSignal && !resting) {
       resting = true;
       void writeRuntimeState({ frozen, resting: true });
-      console.log(`\n⏸  [World] Rest period started — running shift consolidation turn.`);
+      for (const runner of activeRunners.values()) {
+        if (runner.isRunning) runner.pause();
+      }
       const dayCount = (await readWorldState()).dayCount;
       const beings = await listBeings();
-      const restPrompt = buildRestPrompt(dayCount, beings);
-      try {
-        currentAbort = new AbortController();
-        for await (const msg of query({
-          prompt: restPrompt,
-          options: buildQueryOptions({ maxTurns: 8, abortController: currentAbort }) as Parameters<typeof query>[0]['options'],
-        })) {
-          await handleMessage(msg, (id) => {
-            sessionId = id;
-            void writeSessionId(id);
-          });
-          if (currentAbort.signal.aborted) break;
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (!/abort/i.test(msg)) {
-          console.error(`\n[World] Rest turn error: ${msg}\n`);
-        }
+      if (beings.length > 0) {
+        await runRestSummaries(beings, dayCount, baseOptions);
       }
       console.log(`\n⏸  [World] Shift consolidation complete. Waiting for day end...`);
     }
 
-    // Handle day end — engine writes daily record, end rest
+    // ── Day end ───────────────────────────────────────────────────────────
     const dayEndSignal = signals.find((s) => s.type === 'SHIFT_DAY_END');
     if (dayEndSignal) {
-      const state = await incrementDay();
+      const worldState = await incrementDay();
       const today = new Date().toISOString().slice(0, 10);
-      // Gather actual data: count shift files written today by each being (dynamic pool)
-      const allKnownBeings = await listBeings();
+      const allBeings = await listBeings();
       const beingsWithShifts: string[] = [];
-      for (const b of allKnownBeings) {
+      for (const b of allBeings) {
         const shifts = await listTodayShifts(b, today);
         if (shifts.length > 0) beingsWithShifts.push(b);
       }
       const escalations = await readEscalations();
-      const todayEscalations = escalations.filter((e) =>
-        e.createdAt.startsWith(today),
-      );
+      const todayEscalations = escalations.filter((e) => e.createdAt.startsWith(today));
+      const inProgress = await getTasksByStatus('in-progress');
       await writeDailyRecord({
         date: today,
-        dayCount: state.dayCount,
-        beingsActive: beingsWithShifts.length > 0 ? beingsWithShifts : allKnownBeings,
-        tasksCompleted: state.completedProjects ?? [],
-        tasksInProgress: [],
+        dayCount: worldState.dayCount,
+        beingsActive: beingsWithShifts.length > 0 ? beingsWithShifts : allBeings,
+        tasksCompleted: worldState.completedProjects ?? [],
+        tasksInProgress: inProgress.map((t) => t.id),
         escalationCount: todayEscalations.length,
-        keyEvents: [`Day ${state.dayCount} ended at ${new Date().toISOString()}`],
+        keyEvents: [`Day ${worldState.dayCount} ended at ${new Date().toISOString()}`],
         writtenAt: new Date().toISOString(),
       });
       if (resting) {
         resting = false;
         void writeRuntimeState({ frozen, resting: false });
-        console.log(`\n🌄 [World] New day ${state.dayCount + 1} starting — resuming work.`);
+        console.log(`\n🌄 [World] New day ${worldState.dayCount + 1} starting — resuming work.`);
+        const tasks = await getAllTasks();
+        for (const [taskId, runner] of activeRunners) {
+          if (runner.isPaused && !frozenTaskIds.includes(taskId)) {
+            const task = tasks.find((t) => t.id === taskId);
+            if (task) runner.resume(task);
+          }
+        }
       }
     }
 
-    // Skip building a work prompt if we just handled rest/day-end with no other signals
-    if (resting) {
-      await sleep(1000);
-      continue;
-    }
+    // ── Skip work during global freeze or rest period ─────────────────────
+    if (frozen || resting) return;
 
-    // Collect human messages for this turn
-    const messagesForThisTurn = humanMessages.splice(0, humanMessages.length);
-    const [pendingTasks, busyBeings, allBeings, worldState] = await Promise.all([
-      getPendingTasks(),
-      getBusyBeings(),
-      listBeings(),
-      readWorldState(),
-    ]);
-
-    // Auto-scaffold directories for any newly created beings (idempotent)
+    // ── Scaffold new being directories (idempotent) ───────────────────────
+    const allBeings = await listBeings();
     await Promise.all(allBeings.map((id) => createBeingDirectories(id)));
 
-    const prompt = buildOrchestratorPrompt({
-      isFirstRun,
-      dayCount: worldState.dayCount,
-      signals: signals.filter((s) => s.type !== 'MEETUP_FREEZE' && s.type !== 'SHIFT_REST_START'),
+    // ── Start runners for newly assigned tasks ────────────────────────────
+    const assignedTasks = await getTasksByStatus('assigned');
+    for (const task of assignedTasks) {
+      if (!activeRunners.has(task.id) && task.assignedTo?.length) {
+        console.log(`\n🚀 [World] Starting runner for task ${task.id.slice(0, 8)}: "${task.title}"`);
+        const runner = new TaskRunner(task, runnerOpts);
+        activeRunners.set(task.id, runner);
+        void runner.start(task);
+      }
+    }
+
+    // ── Orchestrator assignment turn (only when needed) ───────────────────
+    const pendingTasks = await getPendingTasks();
+    const messagesForThisTurn = globalHumanMessages.splice(0);
+    const needsAssignment =
+      pendingTasks.length > 0 ||
+      messagesForThisTurn.length > 0 ||
+      isFirstRun ||
+      signals.some((s) => s.type === 'TASK_ADDED');
+
+    if (!needsAssignment) return;
+
+    const [busyBeings, worldState] = await Promise.all([getBusyBeings(), readWorldState()]);
+    const prompt = buildAssignmentPrompt({
       pendingTasks,
       humanMessages: messagesForThisTurn,
       allBeings,
       busyBeings,
+      isFirstRun,
+      dayCount: worldState.dayCount,
+      signals,
     });
 
     isFirstRun = false;
 
+    const abortCtrl = new AbortController();
+    const orchOptions = {
+      ...baseOptions,
+      maxTurns: 10,
+      abortController: abortCtrl,
+      ...(orchestratorSessionId ? { resume: orchestratorSessionId } : {}),
+    } as Parameters<typeof query>[0]['options'];
+
     try {
-      await withRetry(
-        async () => {
-          currentAbort = new AbortController();
-          for await (const msg of query({
-            prompt,
-            options: buildQueryOptions({ maxTurns: 15, abortController: currentAbort }) as Parameters<typeof query>[0]['options'],
-          })) {
-            await handleMessage(msg, (id) => {
-              sessionId = id;
-              void writeSessionId(id);
-            });
-            // Break immediately if aborted (freeze or clock interrupt)
-            if (currentAbort.signal.aborted) break;
+      for await (const msg of query({ prompt, options: orchOptions })) {
+        const m = msg as Record<string, unknown>;
+        if (m['type'] === 'system' && m['subtype'] === 'init' && m['session_id']) {
+          orchestratorSessionId = m['session_id'] as string;
+          void writeSessionId(orchestratorSessionId);
+        }
+        if (m['type'] === 'assistant' && Array.isArray(m['content'])) {
+          for (const block of m['content'] as Array<Record<string, unknown>>) {
+            if (block['type'] === 'text' && block['text']) {
+              process.stdout.write(`\n[Orchestrator] ${block['text'] as string}\n`);
+            }
           }
-        },
-        { maxAttempts: 3, baseDelayMs: 10_000, label: 'world turn' },
-      );
+        }
+        if (m['result']) process.stdout.write(`\n[Orchestrator] Assignment turn complete.\n`);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // AbortError is expected on interrupt — not an error
-      if (/abort/i.test(message)) {
-        console.log(`\n[World] Turn interrupted cleanly.\n`);
-        await sleep(1_000);
-        continue;
+      if (!/abort/i.test(message)) {
+        console.error(`\n[Orchestrator] Error: ${message}\n`);
       }
-      // Non-retryable or exhausted retries — log and continue to next turn
-      console.error(`\n[World] Turn skipped after retries: ${message}. Continuing in 15s...\n`);
-      await sleep(15_000);
     }
+  };
 
-    // Brief pause between world turns to avoid rate limits
-    await sleep(5_000);
-  }
+  setInterval(() => { void tick(); }, 5_000);
+  void tick(); // run immediately on startup
 };
 
 // ─── commands ─────────────────────────────────────────────────────────────────
@@ -475,20 +488,15 @@ program
 
 program
   .command('start')
-  .description('Start the world — runs the Orchestrator in a continuous loop')
-  .action(() => {
-    void runWorldLoop();
-  });
+  .description('Start the world — scheduler runs every 5s, tasks run in parallel')
+  .action(() => { void runWorldLoop(); });
 
 program
   .command('task <description>')
   .description('Add a task to the world task queue')
   .option('-p, --priority <priority>', 'Priority: low | normal | high | critical', 'normal')
   .option('--plan', 'Require plan approval before execution', false)
-  .option(
-    '--max-beings <n>',
-    'Max beings the Orchestrator may assign to this task (limits concurrent LLM calls)',
-  )
+  .option('--max-beings <n>', 'Max beings the leader may spawn for this task')
   .action(async (description: string, opts: { priority: string; plan: boolean; maxBeings?: string }) => {
     const maxBeings = opts.maxBeings !== undefined ? Math.max(1, parseInt(opts.maxBeings, 10) || 1) : undefined;
     const task = await enqueueTask({
@@ -504,28 +512,33 @@ program
     console.log(`   ID:          ${task.id}`);
     console.log(`   Title:       ${task.title}`);
     console.log(`   Priority:    ${task.priority}`);
-    if (maxBeings !== undefined) {
-      console.log(`   Max beings:  ${maxBeings}`);
-    }
-    console.log(`\n   The Orchestrator will pick this up on the next world turn.\n`);
+    if (maxBeings !== undefined) console.log(`   Max beings:  ${maxBeings}`);
+    console.log(`\n   The Orchestrator will assign it on the next scheduler tick.\n`);
     process.exit(0);
   });
 
 program
   .command('meetup')
-  .description('Freeze all beings and open a human meetup channel')
-  .action(async () => {
-    await triggerMeetupFreeze();
-    console.log(`\n❄️  Freeze signal sent to the running world.`);
-    console.log(`   The Orchestrator will suspend all beings on its next turn.`);
-    console.log(`   To communicate during the meetup, type directly in the world's terminal.`);
-    console.log(`   Type /done in the world terminal to resume.\n`);
+  .description('Freeze beings for a human meetup (global or task-specific)')
+  .option('--task <taskId>', 'Freeze only the runner for this task ID (prefix supported)')
+  .action(async (opts: { task?: string }) => {
+    if (opts.task) {
+      await appendSignal('MEETUP_FREEZE', { taskId: opts.task });
+      console.log(`\n❄️  Freeze signal sent for task ${opts.task.slice(0, 8)}.`);
+      console.log(`   In the world terminal: /msg --task ${opts.task.slice(0, 8)} <message>`);
+      console.log(`   Then: /done  to resume the task runner.\n`);
+    } else {
+      await triggerMeetupFreeze();
+      console.log(`\n❄️  Global freeze signal sent.`);
+      console.log(`   All runners will pause. Type messages in the world terminal.`);
+      console.log(`   Type /done in the world terminal to resume all.\n`);
+    }
     process.exit(0);
   });
 
 program
   .command('status')
-  .description('Show world status: day count, task queue summary, signals')
+  .description('Show world status: day, tasks, active runners, pending signals')
   .action(async () => {
     const state = await readWorldState();
     const tasks = await getTaskSummary();
@@ -533,30 +546,71 @@ program
     const signals = await readSignals();
     const runtime = await readRuntimeState();
     const pending = signals.filter((s) => !s.processed);
-
-    const worldMode = runtime.frozen ? '❄️  FROZEN (meetup)' : runtime.resting ? '⏸  RESTING (shift rest)' : '▶️  RUNNING';
+    const allTasks = await getAllTasks();
+    const runningTasks = allTasks.filter((t) => t.status === 'in-progress');
+    const mode = runtime.frozen
+      ? '❄️  FROZEN (meetup)'
+      : runtime.resting
+        ? '⏸  RESTING'
+        : '▶️  RUNNING';
 
     console.log(`\n🌍 Vibe Guild Status`);
-    console.log(`   Mode:    ${worldMode}`);
+    console.log(`   Mode:    ${mode}`);
     console.log(`   Day:     ${state.dayCount}`);
     console.log(`   Started: ${state.startedAt ?? 'not yet'}`);
-    if (runtime.updatedAt) console.log(`   State updated: ${runtime.updatedAt}`);
+    if (runtime.updatedAt) console.log(`   Updated: ${runtime.updatedAt}`);
     console.log(`\n📋 Tasks`);
     console.log(`   Pending:     ${tasks.pending}`);
+    console.log(`   Assigned:    ${tasks.assigned ?? 0}`);
     console.log(`   In Progress: ${tasks.inProgress}`);
     console.log(`   Completed:   ${tasks.completed}`);
     console.log(`   Blocked:     ${tasks.blocked}`);
+    if (runningTasks.length > 0) {
+      console.log(`\n🏃 Active Runners`);
+      for (const t of runningTasks) {
+        console.log(`   • ${t.id.slice(0, 8)} — ${t.title.slice(0, 60)}`);
+        console.log(`     leader: ${t.leaderId ?? '?'}  beings: ${(t.assignedTo ?? []).join(', ')}`);
+        console.log(`     progress → world/tasks/${t.id}/progress.json`);
+      }
+    }
     console.log(`\n📡 Pending Signals: ${pending.length}`);
-    for (const s of pending) {
-      console.log(`   • ${s.type} (${s.createdAt})`);
+    for (const s of pending) console.log(`   • ${s.type} (${s.createdAt})`);
+    console.log('');
+    process.exit(0);
+  });
+
+program
+  .command('progress <taskId>')
+  .description('Show progress.json for a task (short ID prefix supported)')
+  .action(async (taskId: string) => {
+    const { readTaskProgress } = await import('./memory/store.js');
+    const allTasks = await getAllTasks();
+    const task = allTasks.find((t) => t.id === taskId || t.id.startsWith(taskId));
+    if (!task) {
+      console.log(`\n⚠️  Task not found: ${taskId}\n`);
+      process.exit(1);
+    }
+    const progress = await readTaskProgress(task.id);
+    if (!progress) {
+      console.log(`\n📭 No progress file yet for task ${task.id.slice(0, 8)}: "${task.title}"\n`);
+    } else {
+      console.log(`\n📊 Progress — ${task.title}`);
+      console.log(`   Leader:   ${progress.leaderId}`);
+      console.log(`   Status:   ${progress.status}`);
+      console.log(`   Complete: ${progress.percentComplete}%`);
+      console.log(`   Summary:  ${progress.summary}`);
+      console.log(`   Updated:  ${progress.lastUpdated}`);
+      if (progress.checkpoints.length > 0) {
+        console.log(`   Checkpoints:`);
+        for (const cp of progress.checkpoints) {
+          console.log(`     • [${cp.at}] ${cp.description}`);
+        }
+      }
     }
     console.log('');
     process.exit(0);
   });
 
 program.parse(process.argv);
+if (process.argv.length < 3) program.help();
 
-// Default: show help if no command given
-if (process.argv.length < 3) {
-  program.help();
-}

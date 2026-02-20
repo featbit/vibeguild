@@ -1,1 +1,15 @@
-[]
+[
+  {
+    "id": "26fbf09f-c150-4178-b881-bb47136d0014",
+    "title": "生成20个中文笑话。要求：每个笑话要简短有趣，涵盖不同类型（谐音、冷笑话、段子等）。所有笑话写入 output/chinese-jokes.md 文件。完成后通",
+    "description": "生成20个中文笑话。要求：每个笑话要简短有趣，涵盖不同类型（谐音、冷笑话、段子等）。所有笑话写入 output/chinese-jokes.md 文件。完成后通过 report 工具汇报给人类操作员。",
+    "status": "pending",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-19T18:29:02.517Z",
+    "updatedAt": "2026-02-19T18:29:02.517Z"
+  }
+]

@@ -27,6 +27,8 @@ const paths = {
   beingProfile: (beingId: string) =>
     join(ROOT, 'beings', beingId, 'profile.json'),
   escalations: join(ROOT, 'reports', 'escalations.json'),
+  taskProgress: (taskId: string) =>
+    join(ROOT, 'tasks', taskId, 'progress.json'),
 } as const;
 
 const ensureDir = async (filePath: string): Promise<void> => {
@@ -231,6 +233,30 @@ export const writeTeamRecord = (
   record: TeamRecord,
 ): Promise<void> => writeJson(paths.team(teamId), record);
 
+// --- Task Progress ---
+
+export type TaskCheckpoint = {
+  at: string;          // ISO timestamp
+  sessionId: string;   // leader's session ID at this point — used for resume
+  description: string; // what was accomplished up to here
+};
+
+export type TaskProgress = {
+  taskId: string;
+  leaderId: string;
+  status: 'in-progress' | 'completed' | 'failed';
+  summary: string;
+  percentComplete: number;
+  checkpoints: TaskCheckpoint[];
+  lastUpdated: string;
+};
+
+export const writeTaskProgress = (progress: TaskProgress): Promise<void> =>
+  writeJson(paths.taskProgress(progress.taskId), progress);
+
+export const readTaskProgress = (taskId: string): Promise<TaskProgress | null> =>
+  readJson<TaskProgress | null>(paths.taskProgress(taskId), null);
+
 // --- Escalations ---
 
 export const appendEscalation = async (escalation: Escalation): Promise<void> => {
@@ -242,7 +268,7 @@ export const appendEscalation = async (escalation: Escalation): Promise<void> =>
 export const readEscalations = (): Promise<Escalation[]> =>
   readJson<Escalation[]>(paths.escalations, []);
 
-// --- Session ID ---
+// --- Session ID (Orchestrator — for meetup / human messages) ---
 
 const sessionPath = join(ROOT, 'sessions', 'orchestrator.json');
 
@@ -255,3 +281,19 @@ export const readSessionId = async (): Promise<string | null> => {
 
 export const writeSessionId = (sessionId: string): Promise<void> =>
   writeJson(sessionPath, { sessionId });
+
+// --- Task Sessions (per-task session for resumption after rest/freeze) ---
+
+const taskSessionPath = (taskId: string) =>
+  join(ROOT, 'sessions', 'tasks', `${taskId}.json`);
+
+export const readTaskSession = async (taskId: string): Promise<string | null> => {
+  const data = await readJson<{ sessionId: string | null }>(
+    taskSessionPath(taskId),
+    { sessionId: null },
+  );
+  return data.sessionId;
+};
+
+export const writeTaskSession = (taskId: string, sessionId: string): Promise<void> =>
+  writeJson(taskSessionPath(taskId), { sessionId });

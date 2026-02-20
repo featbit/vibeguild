@@ -19,7 +19,8 @@ export type Task = {
   description: string;
   status: TaskStatus;
   type: TaskType;
-  assignedTo?: string[];
+  leaderId?: string;       // being responsible for coordination + progress reports
+  assignedTo?: string[];   // all beings on this task (includes leader)
   teamId?: string;
   parentId?: string;
   dependencies: string[];
