@@ -94,6 +94,28 @@ export const updateTaskStatus = async (
 export const getAllTasks = readQueue;
 
 /**
+ * Record sandbox metadata (containerId, repoUrl) on the task after the
+ * Docker adapter starts.  Idempotent — safe to call multiple times.
+ */
+export const updateTaskSandbox = async (
+  taskId: string,
+  sandbox: { containerId?: string; repoUrl?: string },
+): Promise<void> => {
+  const tasks = await readQueue();
+  const updated = tasks.map((t) =>
+    t.id !== taskId
+      ? t
+      : {
+          ...t,
+          ...(sandbox.containerId ? { sandboxContainerId: sandbox.containerId } : {}),
+          ...(sandbox.repoUrl ? { sandboxRepoUrl: sandbox.repoUrl } : {}),
+          updatedAt: new Date().toISOString(),
+        },
+  );
+  await writeQueue(updated);
+};
+
+/**
  * Returns the set of beings currently assigned to an active task
  * (status: assigned or in-progress). Used to enforce the rule that
  * a being may only work on one task at a time.

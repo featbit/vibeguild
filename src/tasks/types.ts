@@ -19,8 +19,8 @@ export type Task = {
   description: string;
   status: TaskStatus;
   type: TaskType;
-  leaderId?: string;       // being responsible for coordination + progress reports
-  assignedTo?: string[];   // all beings on this task (includes leader)
+  leaderId?: string;             // being responsible for coordination + progress reports
+  assignedTo?: string[];         // all beings on this task (includes leader)
   teamId?: string;
   parentId?: string;
   dependencies: string[];
@@ -31,4 +31,9 @@ export type Task = {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  // ─── Sandbox execution plane ───────────────────────────────────────────
+  /** Docker container ID while the task is running in sandbox mode. */
+  sandboxContainerId?: string;
+  /** GitHub repo URL for this task's execution artifacts (docker mode). */
+  sandboxRepoUrl?: string;
 };

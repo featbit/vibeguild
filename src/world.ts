@@ -23,7 +23,7 @@ import {
   getBusyBeings,
   getAllTasks,
 } from './tasks/queue.js';
-import { TaskRunner } from './tasks/runner.js';
+import { createTaskRunner, type WorldTaskRunner } from './tasks/runner.js';
 import {
   startClock,
   triggerMeetupFreeze,
@@ -124,7 +124,7 @@ const runWorldLoop = async (): Promise<void> => {
   const { query } = await import('@anthropic-ai/claude-agent-sdk');
 
   // ── State ────────────────────────────────────────────────────────────────
-  const activeRunners = new Map<string, TaskRunner>();
+  const activeRunners = new Map<string, WorldTaskRunner>();
   let orchestratorSessionId = await readSessionId();
   let isFirstRun = !orchestratorSessionId;
   const globalHumanMessages: string[] = [];
@@ -168,7 +168,7 @@ const runWorldLoop = async (): Promise<void> => {
     const recovering = savedTasks.filter((t) => t.status === 'in-progress' && t.assignedTo?.length);
     for (const task of recovering) {
       console.log(`\n♻️  [World] Recovering task ${task.id.slice(0, 8)}: "${task.title}"`);
-      const runner = new TaskRunner(task, runnerOpts);
+      const runner = createTaskRunner(task, runnerOpts);
       activeRunners.set(task.id, runner);
       void runner.start(task);
     }
@@ -366,7 +366,7 @@ const runWorldLoop = async (): Promise<void> => {
     for (const task of assignedTasks) {
       if (!activeRunners.has(task.id) && task.assignedTo?.length) {
         console.log(`\n🚀 [World] Starting runner for task ${task.id.slice(0, 8)}: "${task.title}"`);
-        const runner = new TaskRunner(task, runnerOpts);
+        const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);
       }

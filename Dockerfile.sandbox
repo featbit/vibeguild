@@ -1,0 +1,33 @@
+# Vibe Guild — Sandbox Container
+#
+# Each world task running in Docker mode gets its own container from this image.
+# The container mounts the workspace at /workspace and runs the sandbox entrypoint
+# (src/sandbox/entrypoint.mjs) which:
+#   1. Receives task context via environment variables
+#   2. Invokes the Claude Code CLI (claude) to execute the task
+#   3. Writes progress updates to /workspace/world/tasks/{taskId}/progress.json
+#
+# Build:
+#   docker build -f Dockerfile.sandbox -t vibeguild-sandbox .
+#
+# The image does NOT embed any secrets — they are injected at runtime via -e flags.
+
+FROM node:22-alpine
+
+# System tools needed inside the sandbox
+RUN apk add --no-cache git bash
+
+# Install Claude Code CLI globally
+# https://docs.anthropic.com/claude-code
+RUN npm install -g @anthropic-ai/claude-code
+
+# Configure git (needed for sandbox repo operations)
+RUN git config --global user.email "sandbox@vibeguild.ai" && \
+    git config --global user.name "Vibe Guild Sandbox"
+
+# The workspace is mounted at /workspace at runtime — no COPY needed for source files.
+# WORKDIR is set here so 'node' commands resolve relative paths from /workspace.
+WORKDIR /workspace
+
+# Default entrypoint — overridden by the DockerSandboxAdapter to pass task context
+CMD ["node", "/workspace/src/sandbox/entrypoint.mjs"]

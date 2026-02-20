@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Vibe Guild Creator CLI — bash entry point
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec node "$DIR/vg.mjs" "$@"
+
+# All logic lives in scripts/vg.mjs — exec above hands off immediately.
