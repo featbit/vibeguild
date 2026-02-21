@@ -188,30 +188,40 @@ This is intentionally read-only and safe for daily operator visibility.
 
 Vibe Guild uses a two-plane model:
 
-1. **Control Plane (host orchestrator)**
+1. **Control Plane (host process)**
    - assignment, scheduling, intervention, escalation,
    - AI beings as persistent cognitive layer (planning, collaboration, memory),
    - writes creator-facing world state (`world/`),
-   - powers low-token visibility through `vg`.
+   - `chokidar` watches `world/tasks/*/progress.json` → fires `onProgress` → creator console,
+   - `/msg --task <id>` writes `inbox.json` → sandbox reads and course-corrects.
 
-2. **Execution Plane (task runtime / sandbox)**
-   - each world task can run in its own sandbox runtime,
-   - the assigned leader + member beings run as runtime instances,
-   - coding and research actions run against task-scoped resources,
-   - detailed execution can live in task-scoped GitHub repos + artifacts.
+2. **Execution Plane (Docker sandbox — one container per world task, multiple tasks run in parallel)**
 
-World beings decide and coordinate, then execute through their sandbox runtime instances.
+   **v1 — Single session (current ✅)**
+   One `claude` CLI process. The leader drives the full task — members exist as named
+   roles in the prompt. The leader acts, writes progress, and records self-notes for
+   all members at task end.
 
-Capability evolution loop:
-
-- beings may start with prior skills from earlier tasks (or be newly created),
-- they can produce skill artifacts inside task repos during execution,
-- at stage boundaries, selected skills sync back to world memory/skill pools for reuse.
+   **v2 — Leader + subagents (planned 🧪)**
+   Leader session uses Claude Code's built-in `Task` tool to spawn each member as an
+   independent subagent inside the same container, sharing the same volume mounts.
+   *(Not yet started — key unknown: whether GLM-5 reliably invokes `Task` tool.)*
 
 Dual state model:
 
-- **Execution truth**: repo + runtime artifacts (deep technical detail).
-- **World truth**: `world/` progress + memory (creator-facing, intervention-ready).
+- **Execution truth**: GitHub commits, `output/` deliverables — deep technical detail.
+- **World truth**: `world/` progress + memory — creator-facing, intervention-ready.
+
+Sandbox isolation via precise Docker volume mounts (not prompt constraints):
+
+| Mount | Mode | Purpose |
+|-------|------|---------|
+| `world/tasks/{id}/` | rw | progress, inbox |
+| `world/beings/{id}/` ×N | rw | memory, profile, skills |
+| `output/` | rw | deliverables |
+| `world/memory/world.json` | ro | read dayCount |
+| `AGENTS.md` | ro | world rules |
+| `src/sandbox/entrypoint.mjs` | ro | entrypoint only |
 
 ## Current Transition Status
 
@@ -238,9 +248,10 @@ Key rule:
 ## Stack
 
 - [Claude Agent SDK](https://code.claude.com/docs/en/sdk) (`@anthropic-ai/claude-agent-sdk`) — orchestration and intervention flow
+- `claude` CLI — runs inside Docker sandbox as the execution agent
 - TypeScript with ESM (`import`, never `require`)
-- `node-cron` — shift clock
-- `chokidar` — sync daemon (Phase 6)
-- sandbox runtime adapter (task-scoped execution; Docker-ready)
+- `chokidar` — watches `progress.json` for real-time creator console updates
+- Docker — one container per world task, precise volume mount isolation
+- sandbox runtime adapter (`local` SDK mode or `docker` mode, switched via `RUNTIME_MODE`)
 
 See [WORLD-DESIGN.md](WORLD-DESIGN.md) for the full architecture reference.
