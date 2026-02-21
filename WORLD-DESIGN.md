@@ -41,44 +41,66 @@ The system supports:
 
 6. **Capability evolution loop**
    - A being may enter a task with prior experience from earlier world tasks, or be newly created.
-   - During execution, beings can produce skill artifacts in the task repo.
-   - At stage boundaries, selected skills are synchronized back into world-level skill memory.
-   - This preserves individual growth and enables cross-task reuse for future teams.
+   - During execution, beings produce deliverables (GitHub commits, output/ files) and
+     write self-notes + skill files directly into `world/beings/{id}/`.
 
 ## Runtime Model
 
 ### High-Level Architecture (ASCII)
 
 ```text
-                         +----------------------------------+
-                         |     Creator / Operator Console   |
-                         |   (vg CLI, meetup, inject msg)   |
-                         +----------------+-----------------+
-                                          |
-                                          v
-+-----------------------------------------------------------------------+
-|                    Control Plane (Host Orchestrator)                  |
-|  - assignment / scheduling / escalation                               |
-|  - task lifecycle + intervention routing                              |
-|  - AI beings collaboration + world memory decisions                   |
-|  - world summary sync (`world/tasks/*/progress.json`)                |
-+------------------------------+----------------------------------------+
-                               |
-               per world task  | runtime adapter boundary
-                               v
-         +----------------------------------------------------+
-         |        Execution Plane (Sandbox Runtime)           |
-         |  - leader being runtime instance                  |
-         |  - member beings runtime instances                |
-         |  - coding/research actions under leader guidance  |
-         |  - task-scoped repo + artifacts + event outbox     |
-         +------------------------+---------------------------+
-                                  |
-                                  v
-                   +-------------------------------+
-                   | Task GitHub Repo + Artifacts  |
-                   | (execution-level truth)       |
-                   +-------------------------------+
+                    +------------------------------------+
+                    |     Creator / Operator Console     |
+                    |  (vg CLI · meetup · inject msg)    |
+                    +------------------+-----------------+
+                                       |
+                                       v
++--------------------------------------------------------------------------+
+|                     Control Plane  (Host Process)                        |
+|                                                                          |
+|   Orchestrator (SDK)              Scheduler (5 s tick)                  |
+|   · create / assign beings        · start runners for assigned tasks    |
+|   · write queue.json              · detect completed / failed runners   |
+|   · world memory decisions        · drain signals (meetup, inject…)     |
+|                                                                          |
+|   chokidar ──────── watches world/tasks/*/progress.json ──────────────► |
+|                     fires onProgress → creator console                  |
+|                                                  │                       |
+|   creator console ──── /msg --task <id> <text> ──►  inbox.json (rw)  ──►|
+|                     inject message mid-execution    sandbox reads next  |
++──────────────────────────────┬───────────────────────────────────────────+
+                               │  one sandbox per world task
+                               │  (multiple tasks → multiple sandboxes run in parallel)
+              ┌────────────────┼────────────────┐
+              │                │                │
+              ▼                ▼                ▼
+   +─────────────────+ +─────────────────+ +─────────────────+
+   │ Sandbox task A  │ │ Sandbox task B  │ │ Sandbox task C  │  (Docker containers)
+   │                 │ │                 │ │                 │
+   │  claude CLI     │ │  claude CLI     │ │  claude CLI     │
+   │  (one process)  │ │  (one process)  │ │  (one process)  │
+   │                 │ │                 │ │                 │
+   │  leader drives  │ │  leader drives  │ │  leader drives  │
+   │  full team in   │ │  full team in   │ │  full team in   │
+   │  one session    │ │  one session    │ │  one session    │
+   │                 │ │                 │ │                 │
+   │  Mounts (rw):   │ │  Mounts (rw):   │ │  Mounts (rw):   │
+   │  tasks/{id}/    │ │  tasks/{id}/    │ │  tasks/{id}/    │
+   │  beings/{id}/×N │ │  beings/{id}/×N │ │  beings/{id}/×N │
+   │  output/        │ │  output/        │ │  output/        │
+   │  Mounts (ro):   │ │  Mounts (ro):   │ │  Mounts (ro):   │
+   │  world.json     │ │  world.json     │ │  world.json     │
+   │  AGENTS.md      │ │  AGENTS.md      │ │  AGENTS.md      │
+   │  entrypoint.mjs │ │  entrypoint.mjs │ │  entrypoint.mjs │
+   +────────┬────────+ +────────┬────────+ +────────┬────────+
+            │                   │                   │
+            └───────────────────┴───────────────────┘
+                                │
+                                ▼
+                    +────────────────────────+
+                    │   GitHub / External    │
+                    │   APIs & Repos         │
+                    +────────────────────────+
 ```
 
 ### Control Plane (Host)
@@ -100,28 +122,66 @@ It does **not** need to execute all coding/research commands directly.
 
 ### Execution Plane (Sandbox)
 
-Each world task can run in a dedicated sandbox runtime (for example, a Docker container)
-with task-scoped resources.
+Each world task gets exactly **one Docker container**. Inside that container, the team
+executes together. Two execution models exist:
 
-Typical sandbox responsibilities:
-- run assigned world beings as task-scoped runtime instances,
-- execute coding/research workflows under team leader coordination,
-- write detailed execution artifacts,
-- track reliable event outbox for resume/recovery.
+---
 
-Identity model:
-- every world task has one team (leader + members),
-- the same team decides in control-plane context,
-- the same team executes in sandbox context via runtime instances,
-- leader remains responsible for coordination, quality bar, and escalation across both planes.
+#### v1 — Single session (current implementation ✅)
+
+One `claude` CLI process, one session. The leader drives the entire task —
+member beings exist only as roles named in the prompt. The leader acts and
+writes on behalf of everyone.
+
+```text
+Docker container
+  └─ claude CLI  (leader session)
+       · executes the full task sequentially
+       · writes progress.json
+       · at the end: writes self-notes + profile.json for all members
+```
+
+Trade-off: simple and reliable, but members don't truly act independently.
+
+---
+
+#### v2 — Leader + subagents (planned, not yet implemented 🧪)
+
+The leader session uses Claude Code's built-in `Task` tool to spawn each team
+member as an independent subagent. Members run concurrently or sequentially
+within the same container, sharing the same volume mounts.
+
+```text
+Docker container
+  └─ claude CLI  (leader session — aria)
+       ├─ Task("You are blake. Create a GitHub issue signed blake/Developer…")
+       │     └─ subagent process  (blake)
+       ├─ Task("You are aria. Reply to blake's issue with your opinion…")
+       │     └─ subagent process  (aria)
+       └─ Task("You are blake. Implement the agreed program…")
+             └─ subagent process  (blake)
+```
+
+Each subagent is a real independent AI execution — not a prompt persona.
+All subagents share the same `/workspace` volume mounts as the leader.
+
+> **Status:** Not yet started. Key unknown: whether GLM-5 will reliably invoke
+> the `Task` tool when instructed. Experiment planned.
+
+---
+
+**Common to both versions:**
+
+Sandbox responsibilities:
+- execute coding/research workflows under leader coordination,
+- write progress.json checkpoints after every meaningful step,
+- write self-notes and update profile.json for all team members at task end,
+- call external APIs (GitHub etc.) to produce deliverables.
 
 Assignment invariants:
 - a single `beingId` can belong to only one world task at a time (task-level exclusivity),
 - once assigned, that being is considered `busy` and cannot be assigned to another world task,
-- inside the same world task, that being may run multiple execution rounds/steps in sandbox runtime,
-- the being returns to `idle` only after release/completion/abort handling for that world task.
-
-Sandbox runtime can be task-scoped to a dedicated GitHub repository.
+- the being returns to `idle` only after the task completes and profile.json is updated.
 
 ### Being Capability Iteration (ASCII)
 
@@ -134,18 +194,21 @@ Sandbox runtime can be task-scoped to a dedicated GitHub repository.
       | decides + executes for current world task   |
       +------------------------+--------------------+
                 |
-                | produce skill artifacts
+                | task completes → leader writes for every team member:
+                |   world/beings/{id}/memory/self-notes/{ts}.json
+                |   world/beings/{id}/profile.json  (skills, lastTaskId)
                 v
       +---------------------------------------------+
-      | Task Repo (stage-scoped skills and notes)   |
+      | World Being Memory  (personal growth)        |
+      | - world/beings/{id}/memory/self-notes/      |
+      | - world/beings/{id}/skills/                 |
       +------------------------+--------------------+
                 |
-                | stage-boundary sync
+                | optionally promoted
                 v
       +---------------------------------------------+
-      | World Skill Memory                           |
-      | - world/beings/{id}/skills/ (personal)      |
-      | - world/shared/skills/ (shared/promoted)    |
+      | World Shared Skills  (cross-being reuse)     |
+      | - world/shared/skills/                      |
       +------------------------+--------------------+
                 |
                 v
@@ -159,9 +222,10 @@ Sandbox runtime can be task-scoped to a dedicated GitHub repository.
 ```text
          execution details (deep)
    +---------------------------------------------+
-   | Task Repo + Runtime Artifacts               |
-   | - commits / diffs / tests / logs            |
-   | - task status internals / checkpoints       |
+   | Execution Artifacts                         |
+   | - GitHub commits / PRs / issues             |
+   | - output/ deliverables (blogs, reports…)    |
+   | - world/tasks/{taskId}/progress.json        |
    +----------------------+----------------------+
                  |
                  | sync contract
@@ -196,7 +260,7 @@ Goals:
 - decision-ready,
 - easy to read by humans and other world tasks.
 
-### Execution-facing state (task repo + artifacts)
+### Execution-facing state (GitHub + output/)
 
 This is the technical state for implementation details:
 - source changes,
@@ -219,7 +283,7 @@ Minimum expected sync outputs:
 - intervention acknowledgements.
 
 Skill sync outputs (stage-boundary):
-- candidate skill artifacts from task repo,
+- candidate skill files written to `world/beings/{id}/skills/`,
 - being-level skill updates (`world/beings/{id}/skills/`),
 - optional promoted shared skills (`world/shared/skills/`),
 - metadata linking skill origin to task/repo/checkpoint.
