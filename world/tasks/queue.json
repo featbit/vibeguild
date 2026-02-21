@@ -1,21 +1,21 @@
 [
   {
-    "id": "c54634e4-24a3-423c-b022-f205280be292",
-    "title": "Find the GitHub repository vibeguild/worlds-first-element (it already exists). T",
-    "description": "Find the GitHub repository vibeguild/worlds-first-element (it already exists). Then leave a personal footprint for each being on the team: create a file at footprints/{your-being-id}.md in that repo describing who you are, your role in Vibe Guild, and what you stand for. Use the GitHub API with the VIBEGUILD_GITHUB_TOKEN environment variable (already set) to create or update each file via PUT https://api.github.com/repos/vibeguild/worlds-first-element/contents/footprints/{being-id}.md. Each team member must add their own footprint file. Report completion with the file URLs.",
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "title": "Discuss and build a program in vibeguild/worlds-first-element",
+    "description": "Go to the GitHub repository https://github.com/vibeguild/worlds-first-element. Your mission has two phases:\n\nPhase 1 - Discuss and decide: Each team member should create a GitHub issue in that repo, signed with their own name and role. Use the issues to discuss with each other: what kind of small program should we build in this repo? Propose ideas freely - it can be a game, a tool, a poem generator, anything creative. React to each other's proposals in issue comments. Reach a consensus on what to build.\n\nPhase 2 - Build it: Once the team agrees on an idea, implement it. Create the actual code files in the repo via the GitHub API (PUT /repos/vibeguild/worlds-first-element/contents/{path}). The program should be runnable and reflect the team's collective personality.\n\nUse the VIBEGUILD_GITHUB_TOKEN environment variable for all GitHub API calls. Sign everything with your being identity. Report completion with links to the issues and the created files.",
     "status": "completed",
     "type": "work",
     "priority": "high",
     "createdBy": "human",
     "dependencies": [],
     "requiresPlanApproval": false,
-    "createdAt": "2026-02-21T13:06:22.817Z",
-    "updatedAt": "2026-02-21T13:12:02.111Z",
-    "leaderId": "dana",
+    "createdAt": "2026-02-22T00:00:00.000Z",
+    "updatedAt": "2026-02-21T16:56:46.083Z",
+    "leaderId": "aria",
     "assignedTo": [
-      "dana",
-      "evan"
+      "aria",
+      "blake"
     ],
-    "completedAt": "2026-02-21T13:12:02.111Z"
+    "completedAt": "2026-02-21T16:56:46.083Z"
   }
 ]

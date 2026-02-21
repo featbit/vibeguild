@@ -227,6 +227,94 @@ Skill sync outputs (stage-boundary):
 This contract enables low-token operator monitoring with `vg` and keeps
 cross-task reuse available to future work.
 
+## Sandbox Isolation
+
+Isolation is enforced through **precise Docker volume mounts** — not prompt constraints.
+Each container sees only the subset of the host filesystem it is allowed to access.
+
+### Volume Mount Map
+
+```text
+Host path                                    Container path                          Mode
+────────────────────────────────────────────────────────────────────────────────────────
+world/memory/world.json                  →   /workspace/world/memory/world.json      :ro
+world/tasks/{taskId}/                    →   /workspace/world/tasks/{taskId}/         :rw
+world/beings/{assignedId}/  (×N beings)  →   /workspace/world/beings/{assignedId}/   :rw
+output/                                  →   /workspace/output/                       :rw
+src/sandbox/entrypoint.mjs              →   /workspace/src/sandbox/entrypoint.mjs   :ro
+AGENTS.md                                →   /workspace/AGENTS.md                    :ro
+```
+
+### What the container CAN and CANNOT do
+
+| Action | Allowed? | Reason |
+|--------|----------|--------|
+| Write progress.json for its task | ✅ | `/workspace/world/tasks/{taskId}/` is rw |
+| Read dayCount from world.json | ✅ | `/workspace/world/memory/world.json` is ro |
+| Update its own beings' profile.json | ✅ | `/workspace/world/beings/{id}/` is rw |
+| Read or write another task's progress | ❌ | That task dir is not mounted |
+| Read or write another being's memory | ❌ | That being dir is not mounted |
+| Modify source code | ❌ | `src/` is not mounted (only entrypoint.mjs ro) |
+| Read world queue / task list | ❌ | `world/tasks/queue.json` is not mounted |
+
+### Sync mechanism (real-time)
+
+The core design goal: **the creator can observe task execution as it happens and intervene
+at any moment** — redirect, add a constraint, or abort — without waiting for a task to finish.
+
+This is achieved through continuous progress reporting from the sandbox to the world:
+
+```text
+ Sandbox container (entrypoint.mjs)
+     │
+     │  Leader writes world/tasks/{taskId}/progress.json after every meaningful step:
+     │    { status, percentComplete, summary, checkpoints: [{time, message}], artifacts }
+     │
+     │  Volume mount makes this a direct write to the host filesystem —
+     │  no network, no copy, no delay.
+     ▼
+ Host filesystem  (same physical file, seen by both sides)
+     │
+     │  chokidar* detects the file change via OS-native event (no polling)
+     │  and immediately fires an onProgress callback in world.ts
+     ▼
+ Creator console
+     📍 [dana→c54634e4] ████░░░░░░ 40% — Calling GitHub API to create footprint files
+          ↳ Created footprints/dana.md successfully
+
+     📍 [dana→c54634e4] ██████████ 100% — Task completed. All footprint files committed.
+```
+
+*chokidar: a Node.js file-watching library backed by OS-native filesystem events
+(ReadDirectoryChangesW on Windows, inotify on Linux). Near-zero latency, no polling loop.
+
+**When to intervene:** if a checkpoint looks wrong, stalls, or the summary reveals a
+misunderstanding, the creator can immediately inject a correction — before the being
+wastes more turns going in the wrong direction.
+
+Inverse direction (creator → container):
+
+```text
+ Creator types: /msg --task <id> <message>
+     │
+     ▼
+ world.ts writes world/tasks/{taskId}/inbox.json  (via volume mount → same file)
+     │
+     │  Container polls inbox.json between tool calls
+     │  reads the message, clears inbox, adjusts execution
+     ▼
+ Claude CLI incorporates instruction → course-corrects in next tool call
+```
+
+### Why file-system sync instead of API/network
+
+- **Zero latency** — OS-level file events, no polling interval
+- **No network surface** — container needs no inbound ports, no server to run
+- **Crash-safe** — every checkpoint is already persisted on host disk; if the container
+  crashes mid-task, the last written checkpoint survives for recovery
+- **Simple recovery** — restart a failed container; progress.json already holds the last
+  known state so the being can resume from the checkpoint instead of starting over
+
 ## Intervention Model
 
 ### Intervention Flow (ASCII)

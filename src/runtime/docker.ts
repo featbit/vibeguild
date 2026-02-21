@@ -1,16 +1,25 @@
 /**
  * DockerSandboxAdapter — runs each world task in a dedicated Docker container.
  *
- * Each container:
- *   - mounts the workspace at /workspace (world/ becomes /workspace/world/)
- *   - runs src/sandbox/entrypoint.mjs which invokes the claude CLI
- *   - syncs progress back to world/tasks/{taskId}/progress.json (watched via chokidar)
- *   - reads human injections from world/tasks/{taskId}/inbox.json
+ * Each container uses PRECISE volume mounts for isolation:
+ *   - world/memory/world.json          :ro  — read dayCount, never write
+ *   - world/tasks/{taskId}/             :rw  — progress.json + inbox.json (this task only)
+ *   - world/beings/{id}/                :rw  — per assigned being only (other beings invisible)
+ *   - output/                           :rw  — shared deliverables directory
+ *   - src/sandbox/entrypoint.mjs        :ro  — the script that drives execution
+ *   - AGENTS.md                         :ro  — world rules and being identity
+ *
+ * No other host filesystem paths are visible inside the container.
+ * This prevents a sandbox from reading/writing other tasks' data or source code.
+ *
+ * Sync mechanism: entrypoint writes progress.json → chokidar on host detects change
+ * → onProgress callback → printed to creator console in real-time.
  *
  * Requires RUNTIME_MODE=docker and a pre-built image (SANDBOX_DOCKER_IMAGE).
  */
 
 import { spawn, exec as execCb } from 'node:child_process';
+import { mkdir } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { watch } from 'chokidar';
@@ -119,10 +128,38 @@ export const createDockerSandboxAdapter = (
 
       // Build docker run args
       const containerName = `vibeguild-${taskId.slice(0, 8)}`;
+
+      // ── Precise volume mounts (isolation boundary) ───────────────────────
+      // Pre-create host-side directories so Docker doesn't create them as root-owned.
+      const taskDir    = join(wPath, 'tasks', taskId);
+      const beingsRoot = join(wPath, 'beings');
+      const assignedBeings = task.assignedTo ?? [leaderId];
+      await mkdir(taskDir, { recursive: true });
+      await Promise.all(assignedBeings.map((id) => mkdir(join(beingsRoot, id), { recursive: true })));
+
+      // Per-being mounts: only the assigned beings' directories are writable.
+      // Every other being's data is invisible to this container.
+      const beingMounts = assignedBeings.flatMap((id) => [
+        '-v', `${beingsRoot}/${id}:/workspace/world/beings/${id}`,
+      ]);
+
       const dockerArgs = [
         // No --rm: we keep the container on failure so we can capture logs
         '--name', containerName,
-        '-v', `${cfg.workspaceRoot}:/workspace`,
+        // ── Read-only context ────────────────────────────────────────────
+        // World-level metadata (dayCount, worldStatus — never written by sandbox)
+        '-v', `${wPath}/memory/world.json:/workspace/world/memory/world.json:ro`,
+        // World rules and being identity (AGENTS.md)
+        '-v', `${join(cfg.workspaceRoot, 'AGENTS.md')}:/workspace/AGENTS.md:ro`,
+        // Sandbox entrypoint script
+        '-v', `${join(cfg.workspaceRoot, 'src', 'sandbox', 'entrypoint.mjs')}:/workspace/src/sandbox/entrypoint.mjs:ro`,
+        // ── Read-write: this task only ──────────────────────────────────
+        // progress.json and inbox.json for this specific task
+        '-v', `${taskDir}:/workspace/world/tasks/${taskId}`,
+        // ── Read-write: assigned beings only ────────────────────────────
+        ...beingMounts,
+        // ── Read-write: shared output directory (deliverables) ──────────
+        '-v', `${join(cfg.workspaceRoot, 'output')}:/workspace/output`,
         '-w', '/workspace',
         '-e', `TASK_ID=${task.id}`,
         '-e', `TASK_TITLE=${encodeURIComponent(task.title)}`,

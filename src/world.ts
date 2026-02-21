@@ -133,9 +133,10 @@ const runWorldLoop = async (): Promise<void> => {
   const globalHumanMessages: string[] = [];
   // Tasks frozen by a task-level meetup (not globally frozen)
   const frozenTaskIds: string[] = [];
-  let frozen = false;    // true during global meetup
-  let resting = false;   // true between SHIFT_REST_START and SHIFT_DAY_END
+  let frozen = false;       // true during global meetup
+  let resting = false;      // true between SHIFT_REST_START and SHIFT_DAY_END
   let schedulerBusy = false;
+  let orchestratorBusy = false; // true while SDK assignment call is in-flight
 
   // Shared base options for all query() calls
   const mcpServer = await createWorldMcpServer();
@@ -152,6 +153,19 @@ const runWorldLoop = async (): Promise<void> => {
   const runnerOpts = {
     mcpServer,
     modelId: process.env.ANTHROPIC_MODEL_ID,
+    onProgress: (p: import('./runtime/adapter.js').SyncedProgress) => {
+      const short = p.taskId.slice(0, 8);
+      const pct = p.percentComplete ?? 0;
+      const bar = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
+      const latest = Array.isArray(p.checkpoints) && p.checkpoints.length > 0
+        ? p.checkpoints[p.checkpoints.length - 1]
+        : null;
+      const latestMsg = latest
+        ? (typeof latest === 'object' ? (latest as Record<string,unknown>)['message'] ?? (latest as Record<string,unknown>)['description'] ?? '' : '')
+        : '';
+      console.log(`\n📍 [${p.leaderId}→${short}] ${bar} ${pct}% — ${p.summary}`);
+      if (latestMsg) console.log(`     ↳ ${latestMsg}`);
+    },
     onComplete: (taskId: string) => { activeRunners.delete(taskId); },
     onError: (taskId: string) => { activeRunners.delete(taskId); },
   };
@@ -403,79 +417,91 @@ const runWorldLoop = async (): Promise<void> => {
 
     if (!needsAssignment) return;
 
-    const [busyBeings, worldState] = await Promise.all([getBusyBeings(), readWorldState()]);
+    // Skip if an SDK call is already in-flight — runners are unblocked every tick regardless.
+    if (orchestratorBusy) return;
+    orchestratorBusy = true;
 
-    // ── Log assignment turn context ───────────────────────────────────────
-    const freeBeings = allBeings.filter((b) => !busyBeings.includes(b));
-    console.log(`\n🧠 [Orchestrator] Assignment turn — Day ${worldState.dayCount}`);
-    if (pendingTasks.length > 0) {
-      console.log(`   Pending tasks (${pendingTasks.length}):`);
-      for (const t of pendingTasks) {
-        const ageMs = Date.now() - new Date(t.createdAt).getTime();
-        const ageStr = ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s` : `${Math.floor(ageMs / 60_000)}m`;
-        console.log(`     • ${t.id.slice(0, 8)}  [${t.priority}]  age:${ageStr}  ${t.title.slice(0, 55)}`);
-      }
-    }
-    if (messagesForThisTurn.length > 0) {
-      console.log(`   Human messages: ${messagesForThisTurn.length}`);
-    }
-    console.log(`   Beings free: ${freeBeings.length > 0 ? freeBeings.join(', ') : 'none'}  |  busy: ${busyBeings.length > 0 ? busyBeings.join(', ') : 'none'}`);
-    console.log(`   Calling SDK…`);
+    // ── Fire-and-forget: orchestrator SDK call must NOT block the tick loop ──
+    // Runner starts (above) happen every 5 s; the SDK may take 30 s – 5 min.
+    void (async () => {
+      try {
+        const [busyBeings, worldState] = await Promise.all([getBusyBeings(), readWorldState()]);
 
-    const prompt = buildAssignmentPrompt({
-      pendingTasks,
-      humanMessages: messagesForThisTurn,
-      allBeings,
-      busyBeings,
-      isFirstRun,
-      dayCount: worldState.dayCount,
-      signals,
-    });
-
-    isFirstRun = false;
-
-    const abortCtrl = new AbortController();
-    const orchOptions = {
-      ...baseOptions,
-      maxTurns: 10,
-      abortController: abortCtrl,
-      ...(orchestratorSessionId ? { resume: orchestratorSessionId } : {}),
-    } as Parameters<typeof query>[0]['options'];
-
-    try {
-      for await (const msg of query({ prompt, options: orchOptions })) {
-        const m = msg as Record<string, unknown>;
-        if (m['type'] === 'system' && m['subtype'] === 'init' && m['session_id']) {
-          orchestratorSessionId = m['session_id'] as string;
-          void writeSessionId(orchestratorSessionId);
-        }
-        if (m['type'] === 'assistant' && Array.isArray(m['content'])) {
-          for (const block of m['content'] as Array<Record<string, unknown>>) {
-            if (block['type'] === 'text' && block['text']) {
-              process.stdout.write(`\n[Orchestrator] ${block['text'] as string}\n`);
-            }
+        // ── Log assignment turn context ─────────────────────────────────────
+        const freeBeings = allBeings.filter((b) => !busyBeings.includes(b));
+        console.log(`\n🧠 [Orchestrator] Assignment turn — Day ${worldState.dayCount}`);
+        if (pendingTasks.length > 0) {
+          console.log(`   Pending tasks (${pendingTasks.length}):`);
+          for (const t of pendingTasks) {
+            const ageMs = Date.now() - new Date(t.createdAt).getTime();
+            const ageStr = ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s` : `${Math.floor(ageMs / 60_000)}m`;
+            console.log(`     • ${t.id.slice(0, 8)}  [${t.priority}]  age:${ageStr}  ${t.title.slice(0, 55)}`);
           }
         }
-        if (m['result']) {
-          // Show newly assigned tasks after this turn
-          const nowAssigned = await getTasksByStatus('assigned');
-          const fresh = nowAssigned.filter((t) => !assignedTasks.some((a) => a.id === t.id));
-          if (fresh.length > 0) {
-            console.log(`\n📋 [Orchestrator] Assigned ${fresh.length} task(s) this turn:`);
-            for (const t of fresh) {
-              console.log(`     • ${t.id.slice(0, 8)}  leader:${t.leaderId ?? '?'}  team:[${(t.assignedTo ?? []).join(', ')}]  "${t.title.slice(0, 55)}"`);
+        if (messagesForThisTurn.length > 0) {
+          console.log(`   Human messages: ${messagesForThisTurn.length}`);
+        }
+        console.log(`   Beings free: ${freeBeings.length > 0 ? freeBeings.join(', ') : 'none'}  |  busy: ${busyBeings.length > 0 ? busyBeings.join(', ') : 'none'}`);
+        console.log(`   Calling SDK…`);
+
+        const prompt = buildAssignmentPrompt({
+          pendingTasks,
+          humanMessages: messagesForThisTurn,
+          allBeings,
+          busyBeings,
+          isFirstRun,
+          dayCount: worldState.dayCount,
+          signals,
+        });
+
+        isFirstRun = false;
+
+        const abortCtrl = new AbortController();
+        const orchOptions = {
+          ...baseOptions,
+          maxTurns: 10,
+          abortController: abortCtrl,
+          ...(orchestratorSessionId ? { resume: orchestratorSessionId } : {}),
+        } as Parameters<typeof query>[0]['options'];
+
+        try {
+          for await (const msg of query({ prompt, options: orchOptions })) {
+            const m = msg as Record<string, unknown>;
+            if (m['type'] === 'system' && m['subtype'] === 'init' && m['session_id']) {
+              orchestratorSessionId = m['session_id'] as string;
+              void writeSessionId(orchestratorSessionId);
             }
-          } else {
-            process.stdout.write(`\n[Orchestrator] Assignment turn complete (no new assignments).\n`);
+            if (m['type'] === 'assistant' && Array.isArray(m['content'])) {
+              for (const block of m['content'] as Array<Record<string, unknown>>) {
+                if (block['type'] === 'text' && block['text']) {
+                  process.stdout.write(`\n[Orchestrator] ${block['text'] as string}\n`);
+                }
+              }
+            }
+            if (m['result']) {
+              // Show newly assigned tasks after this turn
+              const nowAssigned = await getTasksByStatus('assigned');
+              const fresh = nowAssigned.filter((t) => !assignedTasks.some((a) => a.id === t.id));
+              if (fresh.length > 0) {
+                console.log(`\n📋 [Orchestrator] Assigned ${fresh.length} task(s) this turn:`);
+                for (const t of fresh) {
+                  console.log(`     • ${t.id.slice(0, 8)}  leader:${t.leaderId ?? '?'}  team:[${(t.assignedTo ?? []).join(', ')}]  "${t.title.slice(0, 55)}"`);
+                }
+              } else {
+                process.stdout.write(`\n[Orchestrator] Assignment turn complete (no new assignments).\n`);
+              }
+            }
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (!/abort/i.test(message)) {
+            console.error(`\n[Orchestrator] Error: ${message}\n`);
           }
         }
+      } finally {
+        orchestratorBusy = false;
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (!/abort/i.test(message)) {
-        console.error(`\n[Orchestrator] Error: ${message}\n`);
-      }
-    }
+    })();
   };
 
   setInterval(() => { void tick(); }, 5_000);
