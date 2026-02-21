@@ -21,13 +21,22 @@ RUN apk add --no-cache git bash
 # https://docs.anthropic.com/claude-code
 RUN npm install -g @anthropic-ai/claude-code
 
-# Configure git (needed for sandbox repo operations)
-RUN git config --global user.email "sandbox@vibeguild.ai" && \
-    git config --global user.name "Vibe Guild Sandbox"
+# Create a non-root user for running claude CLI
+# claude --dangerously-skip-permissions refuses to run as root (security guard)
+RUN addgroup -S sandbox && adduser -S -G sandbox -u 1001 sandbox
+
+# Configure git for the sandbox user
+RUN mkdir -p /home/sandbox && \
+    git config --global user.email "sandbox@vibeguild.ai" && \
+    git config --global user.name "Vibe Guild Sandbox" && \
+    cp /root/.gitconfig /home/sandbox/.gitconfig && \
+    chown sandbox:sandbox /home/sandbox/.gitconfig
 
 # The workspace is mounted at /workspace at runtime — no COPY needed for source files.
-# WORKDIR is set here so 'node' commands resolve relative paths from /workspace.
 WORKDIR /workspace
+
+# Run as non-root so claude --dangerously-skip-permissions is allowed
+USER sandbox
 
 # Default entrypoint — overridden by the DockerSandboxAdapter to pass task context
 CMD ["node", "/workspace/src/sandbox/entrypoint.mjs"]

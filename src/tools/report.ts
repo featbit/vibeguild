@@ -22,7 +22,7 @@ export const escalateToHumanSchema = {
   beingId: z
     .string()
     .optional()
-    .describe('ID of the being raising the escalation (e.g. aria, bram, cleo)'),
+    .describe('Your being identifier (lowercase, e.g. the name you were given or chose when created)'),
 };
 
 export const handleEscalateToHuman = async (args: {

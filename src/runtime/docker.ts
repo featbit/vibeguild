@@ -120,7 +120,7 @@ export const createDockerSandboxAdapter = (
       // Build docker run args
       const containerName = `vibeguild-${taskId.slice(0, 8)}`;
       const dockerArgs = [
-        '--rm',
+        // No --rm: we keep the container on failure so we can capture logs
         '--name', containerName,
         '-v', `${cfg.workspaceRoot}:/workspace`,
         '-w', '/workspace',
@@ -130,6 +130,8 @@ export const createDockerSandboxAdapter = (
         '-e', `LEADER_ID=${leaderId}`,
         '-e', `ASSIGNED_TO=${task.assignedTo?.join(',') ?? leaderId}`,
         '-e', `ANTHROPIC_API_KEY=${cfg.anthropicApiKey}`,
+        ...(cfg.anthropicBaseUrl ? ['-e', `ANTHROPIC_BASE_URL=${cfg.anthropicBaseUrl}`] : []),
+        ...(cfg.anthropicModel ? ['-e', `ANTHROPIC_MODEL=${cfg.anthropicModel}`] : []),
         '-e', `VIBEGUILD_GITHUB_TOKEN=${cfg.githubToken}`,
         '-e', `VIBEGUILD_GITHUB_ORG=${cfg.githubOrg}`,
         ...(ctx.sandboxRepoUrl ? ['-e', `SANDBOX_REPO_URL=${ctx.sandboxRepoUrl}`] : []),
@@ -158,8 +160,19 @@ export const createDockerSandboxAdapter = (
             ctx.state = 'completed';
             await updateTaskStatus(taskId, 'completed');
             console.log(`\n✅ [Sandbox:${taskId.slice(0, 8)}] Container finished successfully.`);
+            await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
             opts.onComplete?.(taskId);
           } else {
+            // Capture logs (stdout + stderr) before removing the container
+            try {
+              const { stdout: logs, stderr: logsErr } = await execAsync(`docker logs ${ctx.containerId}`);
+              const allLogs = [logs.trim(), logsErr ? `[stderr]\n${logsErr.trim()}` : '']
+                .filter(Boolean).join('\n');
+              if (allLogs) {
+                console.error(`\n📋 [Sandbox:${taskId.slice(0, 8)}] Container logs:\n${allLogs}`);
+              }
+            } catch { /* ignore */ }
+            await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
             ctx.state = 'failed';
             const err = new Error(`Sandbox container exited with code ${exitCode}`);
             console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${err.message}`);

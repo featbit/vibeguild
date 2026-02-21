@@ -27,6 +27,7 @@ const TASK_ID = process.env['TASK_ID'] ?? '';
 const TASK_TITLE = decodeURIComponent(process.env['TASK_TITLE'] ?? 'Untitled task');
 const TASK_DESCRIPTION = decodeURIComponent(process.env['TASK_DESCRIPTION'] ?? '');
 const LEADER_ID = process.env['LEADER_ID'] ?? 'leader';
+const ASSIGNED_TO = (process.env['ASSIGNED_TO'] ?? LEADER_ID).split(',').map(s => s.trim()).filter(Boolean);
 const SANDBOX_REPO_URL = process.env['SANDBOX_REPO_URL'] ?? '';
 
 const WORKSPACE = '/workspace';
@@ -102,8 +103,11 @@ const drainInbox = async () => {
 // ─── prompt ───────────────────────────────────────────────────────────────────
 
 const buildPrompt = () => {
+  const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const teamList = ASSIGNED_TO.join(', ');
   const lines = [
     `You are ${LEADER_ID}, team leader for a Vibe Guild world task running in a Docker sandbox.`,
+    `Your full team: ${teamList}`,
     ``,
     `**Task:** ${TASK_TITLE}`,
     `**Task ID:** ${TASK_ID}`,
@@ -111,14 +115,46 @@ const buildPrompt = () => {
     `## Task description`,
     TASK_DESCRIPTION,
     ``,
-    `## Your responsibilities`,
+    `## Your responsibilities (execute in order)`,
+    ``,
+    `### Phase 1 — Execute the task`,
     `1. Execute this task fully and autonomously.`,
     `2. Write progress checkpoints to: world/tasks/${TASK_ID}/progress.json`,
     `   Schema: { taskId, leaderId, worldDay (read from world/memory/world.json), reportedAt,`,
-    `             status, summary, percentComplete, checkpoints: [] }`,
+    `             status, summary, percentComplete, checkpoints: [], artifacts?: {} }`,
     `3. Poll for human instructions in: world/tasks/${TASK_ID}/inbox.json`,
     `   If inbox has messages, acknowledge them and incorporate the guidance before continuing.`,
-    `4. When done: write status "completed" in progress.json.`,
+    `4. When done: write status "completed" (or "failed") in progress.json.`,
+    ``,
+    `### Phase 2 — Post-task memory (REQUIRED after Phase 1 completes)`,
+    `For EVERY being in the team [${teamList}], do the following:`,
+    ``,
+    `**A. Write a self-note for each being:**`,
+    `   File: world/beings/{being-id}/memory/self-notes/${ts}.json`,
+    `   Create the directory with mkdir if it doesn't exist.`,
+    `   Schema:`,
+    `   {`,
+    `     "timestamp": "${ts}",`,
+    `     "taskId": "${TASK_ID}",`,
+    `     "title": "<short title for this task>",`,
+    `     "role": "<what this being contributed to the task>",`,
+    `     "summary": "<what was accomplished>",`,
+    `     "keyDecisions": ["<decision 1>", ...],`,
+    `     "learnings": ["<thing learned 1>", ...],`,
+    `     "followUps": ["<future action 1>", ...]`,
+    `   }`,
+    ``,
+    `**B. Update profile.json for each being:**`,
+    `   File: world/beings/{being-id}/profile.json`,
+    `   Read the existing profile, then:`,
+    `   - Add any new skills demonstrated in this task to the "skills" array (avoid duplicates)`,
+    `   - Update "status" to "idle"`,
+    `   - Add a "lastTaskId" field with value "${TASK_ID}"`,
+    `   - Add a "lastTaskAt" field with the current ISO timestamp`,
+    `   Write the updated profile back.`,
+    ``,
+    `Note: You are the leader so you write on behalf of all beings. Each being has a different`,
+    `perspective — tailor their self-note to match their role in the task.`,
   ];
 
   if (SANDBOX_REPO_URL) {
@@ -151,13 +187,16 @@ const run = async () => {
     : prompt;
 
   // Invoke Claude Code CLI
+  const modelArgs = process.env['ANTHROPIC_MODEL']
+    ? ['--model', process.env['ANTHROPIC_MODEL']]
+    : [];
   const proc = spawn(
     'claude',
-    ['--dangerously-skip-permissions', '-p', fullPrompt],
+    ['--dangerously-skip-permissions', ...modelArgs, '-p', fullPrompt],
     {
       cwd: WORKSPACE,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: '/root' },
+      env: { ...process.env },
     },
   );
 

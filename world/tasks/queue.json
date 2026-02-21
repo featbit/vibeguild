@@ -1,15 +1,21 @@
 [
   {
-    "id": "26fbf09f-c150-4178-b881-bb47136d0014",
-    "title": "生成20个中文笑话。要求：每个笑话要简短有趣，涵盖不同类型（谐音、冷笑话、段子等）。所有笑话写入 output/chinese-jokes.md 文件。完成后通",
-    "description": "生成20个中文笑话。要求：每个笑话要简短有趣，涵盖不同类型（谐音、冷笑话、段子等）。所有笑话写入 output/chinese-jokes.md 文件。完成后通过 report 工具汇报给人类操作员。",
-    "status": "pending",
+    "id": "c54634e4-24a3-423c-b022-f205280be292",
+    "title": "Find the GitHub repository vibeguild/worlds-first-element (it already exists). T",
+    "description": "Find the GitHub repository vibeguild/worlds-first-element (it already exists). Then leave a personal footprint for each being on the team: create a file at footprints/{your-being-id}.md in that repo describing who you are, your role in Vibe Guild, and what you stand for. Use the GitHub API with the VIBEGUILD_GITHUB_TOKEN environment variable (already set) to create or update each file via PUT https://api.github.com/repos/vibeguild/worlds-first-element/contents/footprints/{being-id}.md. Each team member must add their own footprint file. Report completion with the file URLs.",
+    "status": "completed",
     "type": "work",
-    "priority": "normal",
+    "priority": "high",
     "createdBy": "human",
     "dependencies": [],
     "requiresPlanApproval": false,
-    "createdAt": "2026-02-19T18:29:02.517Z",
-    "updatedAt": "2026-02-19T18:29:02.517Z"
+    "createdAt": "2026-02-21T13:06:22.817Z",
+    "updatedAt": "2026-02-21T13:12:02.111Z",
+    "leaderId": "dana",
+    "assignedTo": [
+      "dana",
+      "evan"
+    ],
+    "completedAt": "2026-02-21T13:12:02.111Z"
   }
 ]

@@ -12,6 +12,10 @@ export type RuntimeMode = 'local' | 'docker';
 export type RuntimeConfig = {
   mode: RuntimeMode;
   anthropicApiKey: string;
+  /** Optional: custom Anthropic-compatible base URL (e.g. third-party provider). */
+  anthropicBaseUrl: string;
+  /** Optional: model override passed to claude CLI inside the sandbox. */
+  anthropicModel: string;
   githubToken: string;
   githubOrg: string;
   dockerImage: string;
@@ -22,6 +26,9 @@ export type RuntimeConfig = {
 export const loadRuntimeConfig = (): RuntimeConfig => ({
   mode: (process.env['RUNTIME_MODE'] ?? 'local') as RuntimeMode,
   anthropicApiKey: process.env['ANTHROPIC_API_KEY'] ?? '',
+  anthropicBaseUrl: process.env['ANTHROPIC_BASE_URL'] ?? '',
+  // Support both ANTHROPIC_MODEL and ANTHROPIC_MODEL_ID (the latter is used by world.ts)
+  anthropicModel: process.env['ANTHROPIC_MODEL'] ?? process.env['ANTHROPIC_MODEL_ID'] ?? '',
   githubToken: process.env['VIBEGUILD_GITHUB_TOKEN'] ?? '',
   githubOrg: process.env['VIBEGUILD_GITHUB_ORG'] ?? 'vibeguild',
   dockerImage: process.env['SANDBOX_DOCKER_IMAGE'] ?? 'vibeguild-sandbox',

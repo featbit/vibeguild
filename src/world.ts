@@ -24,8 +24,8 @@ import {
   getAllTasks,
 } from './tasks/queue.js';
 import { createTaskRunner, type WorldTaskRunner } from './tasks/runner.js';
+import { loadRuntimeConfig } from './runtime/config.js';
 import {
-  startClock,
   triggerMeetupFreeze,
   triggerMeetupResume,
 } from './scheduler/clock.js';
@@ -92,7 +92,10 @@ const buildAssignmentPrompt = (ctx: OrchestratorContext): string => {
       `  1. Choose the right beings (create if needed).`,
       `  2. Pick ONE being as leader — they will coordinate + write progress.json.`,
       `  3. Update the task in world/tasks/queue.json: set status="assigned", leaderId="...", assignedTo=[...].`,
-      `  The engine will automatically start a TaskRunner for each assigned task.`,
+      ``,
+      `!! CRITICAL: Do NOT execute tasks yourself. Do NOT call APIs, write output files, or do research.`,
+      `!! Your ONLY job here is to write world/tasks/queue.json with status=assigned, leaderId, assignedTo.`,
+      `!! A sandbox runner will automatically start for each assigned task. The being will do the actual work.`,
       `---`,
     );
   }
@@ -137,7 +140,8 @@ const runWorldLoop = async (): Promise<void> => {
   // Shared base options for all query() calls
   const mcpServer = await createWorldMcpServer();
   const baseOptions: Record<string, unknown> = {
-    allowedTools: ['Read', 'Write', 'Bash', 'Task', 'WebSearch', 'WebFetch'],
+    // Orchestrator only reads/writes world state — no Bash, no web, no task execution.
+    allowedTools: ['Read', 'Write'],
     settingSources: ['project'],
     permissionMode: 'bypassPermissions',
     ...(process.env.ANTHROPIC_MODEL_ID ? { model: process.env.ANTHROPIC_MODEL_ID } : {}),
@@ -154,13 +158,19 @@ const runWorldLoop = async (): Promise<void> => {
 
   // ── Startup ──────────────────────────────────────────────────────────────
   await markWorldStarted();
-  startClock();
+  // Clock removed — world days are lightweight chronology metadata, not execution constraints.
+  // See WORLD-DESIGN.md § Time Semantics.
 
   const initialBeings = await listBeings();
   const state = await readWorldState();
-  console.log(`\n🌍 Vibe Guild is alive. Day ${state.dayCount + 1} starting.`);
-  console.log(`   Beings: ${initialBeings.length > 0 ? initialBeings.join(', ') : 'none yet (will be created as needed)'}`);
-  console.log(`   Shift: 8 min work → 2 min rest = 10 min day\n`);
+  const runtimeMode = process.env['RUNTIME_MODE'] ?? 'local';
+  const modelId = process.env['ANTHROPIC_MODEL_ID'] ?? 'default';
+  const dockerImage = process.env['SANDBOX_DOCKER_IMAGE'] ?? 'vibeguild-sandbox';
+  console.log(`\n🌍 Vibe Guild is alive. Day ${state.dayCount} starting.`);
+  console.log(`   Beings    : ${initialBeings.length > 0 ? initialBeings.join(', ') : 'none yet'}`);
+  console.log(`   Runtime   : ${runtimeMode}${runtimeMode === 'docker' ? ` (image: ${dockerImage})` : ' (in-process SDK)'}`);
+  console.log(`   Model     : ${modelId}`);
+  console.log(`   World day : ${state.dayCount}  |  tasks: ${(await getAllTasks()).length}\n`);
 
   // ── Recover in-progress tasks from a previous run ────────────────────────
   {
@@ -350,7 +360,7 @@ const runWorldLoop = async (): Promise<void> => {
       if (resting) {
         resting = false;
         void writeRuntimeState({ frozen, resting: false });
-        console.log(`\n🌄 [World] Day ${worldState.dayCount + 1} starting. Daily record written. Runners continue.`);
+        console.log(`\n🌄 [World] Day ${worldState.dayCount} starting. Daily record written. Runners continue.`);
       }
     }
 
@@ -365,7 +375,17 @@ const runWorldLoop = async (): Promise<void> => {
     const assignedTasks = await getTasksByStatus('assigned');
     for (const task of assignedTasks) {
       if (!activeRunners.has(task.id) && task.assignedTo?.length) {
-        console.log(`\n🚀 [World] Starting runner for task ${task.id.slice(0, 8)}: "${task.title}"`);
+        // Ensure being directories exist before the sandbox starts writing to them
+        await Promise.all((task.assignedTo ?? []).map((id) => createBeingDirectories(id)));
+        const cfg2 = loadRuntimeConfig();
+        const ageMs = Date.now() - new Date(task.createdAt).getTime();
+        const ageSec = Math.floor(ageMs / 1000);
+        const ageStr = ageSec < 60 ? `${ageSec}s` : `${Math.floor(ageSec / 60)}m${ageSec % 60}s`;
+        console.log(`\n🚀 [World] Starting runner — task ${task.id.slice(0, 8)}`);
+        console.log(`   Title    : ${task.title.slice(0, 72)}`);
+        console.log(`   Leader   : ${task.leaderId ?? '?'}  |  team: ${(task.assignedTo ?? []).join(', ')}`);
+        console.log(`   Priority : ${task.priority}  |  age: ${ageStr}`);
+        console.log(`   Mode     : ${cfg2.mode}${cfg2.mode === 'docker' ? ` (image: ${cfg2.dockerImage})` : ' (local SDK)'}`);
         const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);
@@ -384,6 +404,24 @@ const runWorldLoop = async (): Promise<void> => {
     if (!needsAssignment) return;
 
     const [busyBeings, worldState] = await Promise.all([getBusyBeings(), readWorldState()]);
+
+    // ── Log assignment turn context ───────────────────────────────────────
+    const freeBeings = allBeings.filter((b) => !busyBeings.includes(b));
+    console.log(`\n🧠 [Orchestrator] Assignment turn — Day ${worldState.dayCount}`);
+    if (pendingTasks.length > 0) {
+      console.log(`   Pending tasks (${pendingTasks.length}):`);
+      for (const t of pendingTasks) {
+        const ageMs = Date.now() - new Date(t.createdAt).getTime();
+        const ageStr = ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s` : `${Math.floor(ageMs / 60_000)}m`;
+        console.log(`     • ${t.id.slice(0, 8)}  [${t.priority}]  age:${ageStr}  ${t.title.slice(0, 55)}`);
+      }
+    }
+    if (messagesForThisTurn.length > 0) {
+      console.log(`   Human messages: ${messagesForThisTurn.length}`);
+    }
+    console.log(`   Beings free: ${freeBeings.length > 0 ? freeBeings.join(', ') : 'none'}  |  busy: ${busyBeings.length > 0 ? busyBeings.join(', ') : 'none'}`);
+    console.log(`   Calling SDK…`);
+
     const prompt = buildAssignmentPrompt({
       pendingTasks,
       humanMessages: messagesForThisTurn,
@@ -418,7 +456,19 @@ const runWorldLoop = async (): Promise<void> => {
             }
           }
         }
-        if (m['result']) process.stdout.write(`\n[Orchestrator] Assignment turn complete.\n`);
+        if (m['result']) {
+          // Show newly assigned tasks after this turn
+          const nowAssigned = await getTasksByStatus('assigned');
+          const fresh = nowAssigned.filter((t) => !assignedTasks.some((a) => a.id === t.id));
+          if (fresh.length > 0) {
+            console.log(`\n📋 [Orchestrator] Assigned ${fresh.length} task(s) this turn:`);
+            for (const t of fresh) {
+              console.log(`     • ${t.id.slice(0, 8)}  leader:${t.leaderId ?? '?'}  team:[${(t.assignedTo ?? []).join(', ')}]  "${t.title.slice(0, 55)}"`);
+            }
+          } else {
+            process.stdout.write(`\n[Orchestrator] Assignment turn complete (no new assignments).\n`);
+          }
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
