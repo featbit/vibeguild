@@ -49,3 +49,59 @@ Fallback policy:
 1. Try `scripts/vg.mjs` first for low-token, operator-friendly output
 2. Only read raw files under `world/` when CLI output is insufficient
 3. Keep summaries concise and action-oriented for the creator
+
+---
+
+## Operator Workflow (for Copilot — guide the creator through these steps)
+
+### Starting the world
+
+```sh
+npm start
+```
+
+All operator commands (`/task`, `/pause --task`, etc.) must be typed into **this same terminal**
+— not a separate PowerShell window.
+
+### Creating a task
+
+```
+/task <description>
+```
+
+Wait for `📋 Task added: <uuid>` and then `🚀 [World] Starting runner` before issuing any
+`/pause` command. The task ID prefix (first 8 chars) is used in all follow-up commands.
+
+### Testing / using the alignment flow
+
+1. Create a task and wait for the first `📍` progress line.
+2. Issue a pause:
+   ```
+   /pause --task <id-prefix> <optional opening message>
+   ```
+3. Within ~2 seconds the container's Claude process is killed via `pause.signal` + SIGTERM
+   (no LLM cooperation needed). You'll see:
+   ```
+   📍 [leader→<id>] … — Paused by creator for alignment
+   🤔 [leader→<id>] Leader needs your input:
+      "<context from pause message>"
+      ► Type your reply (press Enter to send). Type /done to let leader proceed independently.
+   ```
+4. Type messages directly — no prefix. Each message is sent to the task inbox and Claude is
+   re-launched with the full conversation history.
+5. Blake/Casey will **always** acknowledge first (write `waiting_for_human` with their
+   understanding + plan), then ask "Shall I proceed?". You'll see their reply as:
+   ```
+   💬 [leader] <acknowledgment + updated plan>
+      ► Your reply:
+   ```
+6. Reply to refine further, or type `/done` to let the leader proceed independently.
+
+### Common mistakes to avoid
+
+- **Do NOT** type `/pause --task` in a separate PowerShell window — it must be in the `npm start` terminal.
+- **Do NOT** issue `/pause --task` before the first `📍` appears — the container may not be running yet.
+- If alignment resolves immediately without a `🤔` prompt, it means the previous Claude process
+  had already written `in-progress` before the signal arrived. Just issue `/pause --task` again
+  on the same task — it re-enters alignment mode.
+- `/done` ends alignment and tells the leader to proceed on its own judgment.
