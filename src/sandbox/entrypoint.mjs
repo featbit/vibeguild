@@ -351,11 +351,14 @@ const buildResumePrompt = (humanAnswer, prevProgress, history) => {
     ``,
     `Your progress before pausing: ${prevProgress?.percentComplete ?? 0}% — ${prevProgress?.summary ?? 'unknown'}`,
     ``,
-    `If this response is sufficient: resume the task by writing status="in-progress" to progress.json,`,
-    `then CONTINUE from where you stopped. Do NOT restart.`,
+    `MANDATORY: You MUST write status="waiting_for_human" to respond to the operator before doing anything else.`,
+    `In your "question" field, write your acknowledgment of their message and confirm your updated plan,`,
+    `then ask: "Shall I proceed, or do you have more guidance?"`,
     ``,
-    `If you still need clarification: write status="waiting_for_human" again with a new "question" field.`,
-    `Keep follow-ups concise and specific. You can exchange multiple messages before continuing.`,
+    `Only write status="in-progress" (and resume the task) when the operator explicitly says to proceed`,
+    `(e.g. "ok go ahead", "proceed", "/done") or when they have no more questions.`,
+    ``,
+    `Do NOT silently resume — always acknowledge first and wait for confirmation.`,
     `---`,
   ].join('\n');
 };

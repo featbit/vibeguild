@@ -185,6 +185,11 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`\n🤔 [${p.leaderId}→${short}] Leader needs your input:`);
         console.log(`   "${question}"`);
         console.log(`   ► Type your reply (press Enter to send). Type /done to let leader proceed independently.\n`);
+      } else if (p.status === 'waiting_for_human' && aligningTaskId === p.taskId) {
+        // Already in alignment mode — leader wrote a new waiting_for_human (acknowledgment or follow-up)
+        const question = p.question ?? p.summary;
+        console.log(`\n💬 [${p.leaderId}] ${question}`);
+        console.log(`   ► Your reply:\n`);
       }
 
       // Auto-exit alignment mode when leader resumes on its own
