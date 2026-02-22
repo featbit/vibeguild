@@ -111,6 +111,9 @@ The host orchestrator is responsible for:
 - escalation handling,
 - creator meetup and live intervention,
 - syncing task summaries into `world/`.
+- **crash recovery**: on restart, any task with `status: "in-progress"` in queue.json is
+  automatically re-launched. The previous Docker container (if any) is removed first
+  (`docker rm -f`) to avoid container name conflicts.
 
 Within this plane, AI beings provide:
 - task understanding and decomposition,
@@ -479,13 +482,16 @@ Technical flow — `/pause --task` (operator-initiated):
 
 Technical flow — leader-initiated (`waiting_for_human`):
 1. Leader writes `status: "waiting_for_human"`, `question: "…"` to progress.json and exits Claude.
-2. `chokidar` fires → `onProgress` detects the status → host enters **alignment mode**.
+2. `chokidar` fires → `onProgress` detects the status → host enters **alignment mode**, prints `🤔`.
 3. Entrypoint alignment loop drains the inbox (clearing any stale messages), then waits for
    a fresh operator message (30 min timeout).
-4. Operator types reply → message written to inbox → entrypoint reads it → re-launches
-   Claude with full conversation history (`alignHistory[]` array).
-5. Claude processes, writes `in-progress` (done) or `waiting_for_human` (follow-up).
-6. Loop continues. Safety cap: 20 rounds maximum before auto-fail.
+4. Operator types reply → message written to inbox → entrypoint re-launches Claude with
+   full conversation history (`alignHistory[]` array). **No `in-progress` is written first** —
+   that would immediately exit alignment mode on the host.
+5. Claude MUST write `waiting_for_human` to acknowledge the operator's message and confirm
+   its updated plan before resuming. Host prints `💬 [leader] <acknowledgment>`.
+6. Operator confirms ("可以" / "proceed") → Claude writes `in-progress` → loop exits.
+7. Safety cap: 20 rounds maximum before auto-fail.
 
 ### /pause --task and alignment quick reference
 
