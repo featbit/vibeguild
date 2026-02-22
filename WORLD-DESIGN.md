@@ -472,10 +472,12 @@ Technical flow:
 1. Leader writes `status: "waiting_for_human"`, `question: "…"` to progress.json and exits.
 2. `chokidar` fires → `onProgress` detects the status → host enters **alignment mode**.
    Container is **not paused**. All terminal input routes to `inbox.json`.
-3. Operator types reply → message written to inbox → entrypoint reads it → re-launches
+3. Entrypoint alignment loop drains the inbox (clearing any stale MEETUP REQUEST that
+   triggered this round), then waits for a fresh operator message (30 min timeout).
+4. Operator types reply → message written to inbox → entrypoint reads it → re-launches
    Claude with full conversation history (`alignHistory[]` array).
-4. Claude processes, writes `in-progress` (done) or `waiting_for_human` (follow-up).
-5. Loop continues. Safety cap: 20 rounds maximum before auto-fail.
+5. Claude processes, writes `in-progress` (done) or `waiting_for_human` (follow-up).
+6. Loop continues. Safety cap: 20 rounds maximum before auto-fail.
 
 ### /pause --task and alignment quick reference
 
