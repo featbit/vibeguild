@@ -165,6 +165,19 @@ const runWorldLoop = async (): Promise<void> => {
         : '';
       console.log(`\n📍 [${p.leaderId}→${short}] ${bar} ${pct}% — ${p.summary}`);
       if (latestMsg) console.log(`     ↳ ${latestMsg}`);
+
+      // Auto-pause when leader requests human alignment
+      if (p.status === 'waiting_for_human') {
+        const runner = activeRunners.get(p.taskId);
+        if (runner && runner.isRunning && !frozenTaskIds.includes(p.taskId)) {
+          void runner.pause();
+          frozenTaskIds.push(p.taskId);
+          const question = p.question ?? p.summary;
+          console.log(`\n🤔 [${p.leaderId}→${short}] Task paused — leader needs your input:`);
+          console.log(`   "${question}"`);
+          console.log(`   ► Type your response, then /done to resume.\n`);
+        }
+      }
     },
     onComplete: (taskId: string) => { activeRunners.delete(taskId); },
     onError: (taskId: string) => { activeRunners.delete(taskId); },
@@ -263,6 +276,33 @@ const runWorldLoop = async (): Promise<void> => {
         } else {
           console.log(`\n⚠️  No active runner for task ${taskId.slice(0, 8)}\n`);
         }
+      }
+      return;
+    }
+
+    // /pause --task <id> [optional message] — freeze a specific task and enter meetup mode
+    const taskPauseMatch = input.match(/^\/pause --task ([a-f0-9-]+)(.*)?$/);
+    if (taskPauseMatch) {
+      const [, rawId, rest] = taskPauseMatch;
+      const optMsg = rest?.trim() ?? '';
+      const fullId = activeRunners.has(rawId)
+        ? rawId
+        : [...activeRunners.keys()].find((id) => id.startsWith(rawId));
+      if (fullId) {
+        const runner = activeRunners.get(fullId)!;
+        if (runner.isRunning) {
+          void runner.pause();
+          if (!frozenTaskIds.includes(fullId)) frozenTaskIds.push(fullId);
+          console.log(`\n⏸  Task ${fullId.slice(0, 8)} paused for meetup.`);
+          console.log(`   Use /msg --task ${fullId.slice(0, 8)} <message> to send corrections.`);
+          console.log(`   Type /done to resume.\n`);
+          if (optMsg) void activeRunners.get(fullId)!.injectMessage(optMsg);
+        } else {
+          const stateStr = runner.isPaused ? 'paused' : runner.isFinished ? 'finished' : 'idle';
+          console.log(`\n⚠️  Task ${fullId.slice(0, 8)} is not currently running (state: ${stateStr}).\n`);
+        }
+      } else {
+        console.log(`\n⚠️  No active runner found for task ${rawId}\n`);
       }
       return;
     }
@@ -399,7 +439,7 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`   Title    : ${task.title.slice(0, 72)}`);
         console.log(`   Leader   : ${task.leaderId ?? '?'}  |  team: ${(task.assignedTo ?? []).join(', ')}`);
         console.log(`   Priority : ${task.priority}  |  age: ${ageStr}`);
-        console.log(`   Mode     : ${cfg2.mode}${cfg2.mode === 'docker' ? ` (image: ${cfg2.dockerImage})` : ' (local SDK)'}`);
+        console.log(`   Mode     : ${cfg2.mode}${cfg2.mode === 'docker' ? ` (image: ${cfg2.dockerImage}, exec: ${cfg2.executionMode})` : ' (local SDK)'}`);
         const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);

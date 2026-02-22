@@ -122,13 +122,28 @@ const buildPrompt = () => {
     `2. Write progress.json at EVERY significant step (not just start/end):`,
     `   File: world/tasks/${TASK_ID}/progress.json`,
     `   Schema: { taskId, leaderId, worldDay (read from world/memory/world.json), reportedAt,`,
-    `             status ("in-progress"|"completed"|"failed"), summary (current step description),`,
-    `             percentComplete (0-100), checkpoints: [{time, message}], artifacts?: {} }`,
+    `             status ("in-progress"|"completed"|"failed"|"waiting_for_human"), summary,`,
+    `             percentComplete (0-100), checkpoints: [{time, message}], artifacts?: {},`,
+    `             question?: string (only when status is "waiting_for_human") }`,
     `   IMPORTANT: Update progress.json after each meaningful action so the human operator`,
     `   can monitor your progress in real-time. Aim for an update every 2-5 tool calls.`,
     `3. Poll for human instructions in: world/tasks/${TASK_ID}/inbox.json`,
     `   If inbox has messages, acknowledge them and incorporate the guidance before continuing.`,
     `4. When done: write status "completed" (or "failed") in progress.json.`,
+    ``,
+    `### Human Alignment Protocol (use sparingly, only for consequential blockers)`,
+    `If you are uncertain about a decision that is CONSEQUENTIAL and you cannot proceed without`,
+    `the human's input:`,
+    `1. Write progress.json with status "waiting_for_human", a "question" field describing`,
+    `   exactly what you need clarity on, and percentComplete set to current progress.`,
+    `2. STOP immediately. Do NOT write anything else. Do NOT continue the task.`,
+    `The system will pause you, show your question to the operator, and re-launch you with`,
+    `their answer in your inbox. You will then continue from where you left off.`,
+    ``,
+    `When NOT to request alignment:`,
+    `- Minor stylistic or implementation choices — use your judgment.`,
+    `- Anything that you can reasonably infer from the task description.`,
+    `- Questions you could answer yourself with a bit of research.`,
     ``,
     `### Phase 2 — Post-task memory (REQUIRED after Phase 1 completes)`,
     `For EVERY being in the team [${teamList}], do the following:`,
@@ -172,31 +187,54 @@ const buildPrompt = () => {
   return lines.join('\n');
 };
 
-// ─── main ─────────────────────────────────────────────────────────────────────
+// ─── v2 subagent prompt ────────────────────────────────────────────────────────
 
-const run = async () => {
-  if (!TASK_ID) {
-    console.error('[sandbox] TASK_ID is not set. Exiting.');
-    process.exit(1);
-  }
+const buildV2Prompt = () => {
+  const base = buildPrompt();
+  const members = ASSIGNED_TO.filter((id) => id !== LEADER_ID);
+  const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const lines = [
+    base,
+    ``,
+    `## Execution Model: v2 — Leader + Subagents`,
+    ``,
+    `You are ${LEADER_ID}, the team leader. For this task you MUST use Claude's built-in`,
+    `\`Task\` tool to spawn each team member as an independent subagent.`,
+    `Each subagent runs as a real separate AI process that shares this container's filesystem.`,
+    ``,
+    `Team members to spawn: ${members.length > 0 ? members.join(', ') : '(solo task — no subagents needed)'}`,
+    ``,
+    `### Spawning pattern`,
+    `Use the Task tool with a prompt like:`,
+    `  "You are {member}. You are working on Vibe Guild task ${TASK_ID}: ${TASK_TITLE}.`,
+    `   Your role: [describe their specific contribution].`,
+    `   The workspace is at /workspace. Write your deliverables there.`,
+    `   Your being directory: world/beings/{member}/.`,
+    `   When done, write your self-note to world/beings/{member}/memory/self-notes/${ts}.json`,
+    `   and update world/beings/{member}/profile.json (set status to idle, lastTaskId=${TASK_ID})."`,
+    ``,
+    `You may spawn subagents sequentially (if they depend on each other's output) or`,
+    `concurrently (if they work independently). Use your judgment.`,
+    ``,
+    `Continue to write progress.json yourself after each significant milestone.`,
+  ];
+  return lines.join('\n');
+};
 
-  console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE}`);
-  await writeProgress('in-progress', 'Sandbox agent starting…', 0);
+// ─── claude invocation ────────────────────────────────────────────────────────
 
-  // Check for any messages already in inbox before launching claude
-  const initialMsgs = await drainInbox();
-  const prompt = buildPrompt();
-  const fullPrompt = initialMsgs.length > 0
-    ? `${prompt}\n\n--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
-    : prompt;
-
-  // Invoke Claude Code CLI
+/**
+ * Spawn the Claude CLI with the given prompt.
+ * @param {string} prompt
+ * @returns {Promise<void>}
+ */
+const runClaude = async (prompt) => {
   const modelArgs = process.env['ANTHROPIC_MODEL']
     ? ['--model', process.env['ANTHROPIC_MODEL']]
     : [];
   const proc = spawn(
     'claude',
-    ['--dangerously-skip-permissions', ...modelArgs, '-p', fullPrompt],
+    ['--dangerously-skip-permissions', ...modelArgs, '-p', prompt],
     {
       cwd: WORKSPACE,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -217,8 +255,102 @@ const run = async () => {
       else reject(new Error(`claude exited with code ${code}`));
     });
   });
+};
 
-  // Final progress sync (the leader may have already written completed — that's fine)
+/**
+ * Block until inbox.json receives at least one message, then drain and return them joined.
+ * Returns null if the timeout (ms) expires with no response.
+ * @param {number} timeoutMs
+ * @returns {Promise<string|null>}
+ */
+const waitForInboxResponse = async (timeoutMs) => {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const msgs = await drainInbox();
+    if (msgs.length > 0) return msgs.join('\n');
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  return null;
+};
+
+/**
+ * Build the continuation prompt used when re-launching after a waiting_for_human pause.
+ * @param {string} humanAnswer
+ * @param {object} prevProgress
+ * @returns {string}
+ */
+const buildResumePrompt = (humanAnswer, prevProgress) => {
+  const base = EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt();
+  return [
+    base,
+    ``,
+    `--- ALIGNMENT RESPONSE FROM OPERATOR ---`,
+    `You previously paused to request human alignment. The operator has responded:`,
+    ``,
+    `> ${humanAnswer}`,
+    ``,
+    `Your last recorded progress: ${prevProgress?.percentComplete ?? 0}% — ${prevProgress?.summary ?? 'unknown'}`,
+    ``,
+    `Resume the task from where you left off, incorporating the operator's guidance above.`,
+    `Do not restart from scratch — pick up where you stopped.`,
+    `---`,
+  ].join('\n');
+};
+
+// ─── main ─────────────────────────────────────────────────────────────────────
+
+const EXECUTION_MODE = process.env['EXECUTION_MODE'] ?? 'v1';
+
+const run = async () => {
+  if (!TASK_ID) {
+    console.error('[sandbox] TASK_ID is not set. Exiting.');
+    process.exit(1);
+  }
+
+  console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE} (mode: ${EXECUTION_MODE})`);
+  await writeProgress('in-progress', 'Sandbox agent starting…', 0);
+
+  // Check for any messages already in inbox before launching claude
+  const initialMsgs = await drainInbox();
+  const basePrompt = EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt();
+  const firstPrompt = initialMsgs.length > 0
+    ? `${basePrompt}\n\n--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
+    : basePrompt;
+
+  // ── First run ────────────────────────────────────────────────────────────
+  await runClaude(firstPrompt);
+
+  // ── Human alignment loop ─────────────────────────────────────────────────
+  // If Claude wrote waiting_for_human, pause and wait for the operator's response,
+  // then re-launch with the answer. Repeat up to 3 times.
+  const MAX_ALIGNMENT_ROUNDS = 3;
+  for (let round = 0; round < MAX_ALIGNMENT_ROUNDS; round++) {
+    const progress = await safeReadJson(join(TASK_DIR, 'progress.json'));
+    if (!progress || progress.status !== 'waiting_for_human') break;
+
+    const question = progress.question ?? progress.summary ?? '(no question provided)';
+    console.log(`[sandbox] Leader requested alignment (round ${round + 1}): "${question}"`);
+    console.log(`[sandbox] Waiting for operator response (timeout: 30 min)…`);
+
+    // 30-minute timeout per alignment round
+    const answer = await waitForInboxResponse(30 * 60 * 1000);
+    if (!answer) {
+      console.error('[sandbox] Timed out waiting for human alignment. Marking task failed.');
+      await writeProgress(
+        'failed',
+        `Timed out waiting for operator response to: "${question}"`,
+        progress.percentComplete ?? 0,
+      );
+      process.exit(1);
+    }
+
+    console.log(`[sandbox] Operator responded. Re-launching with guidance.`);
+    await writeProgress('in-progress', 'Resuming after human alignment.', progress.percentComplete ?? 0);
+    await runClaude(buildResumePrompt(answer, progress));
+  }
+
+  // ── Final progress sync ──────────────────────────────────────────────────
+  // (leader may have already written completed — that's fine)
   const current = await safeReadJson(join(TASK_DIR, 'progress.json'));
   if (!current || current.status !== 'completed') {
     await writeProgress('completed', 'Sandbox agent finished execution.', 100);

@@ -9,6 +9,12 @@ import { join } from 'node:path';
 
 export type RuntimeMode = 'local' | 'docker';
 
+/**
+ * v1 — single Claude session (current default).
+ * v2 — leader spawns team members as independent subagents via Claude's Task tool.
+ */
+export type ExecutionMode = 'v1' | 'v2';
+
 export type RuntimeConfig = {
   mode: RuntimeMode;
   anthropicApiKey: string;
@@ -19,6 +25,11 @@ export type RuntimeConfig = {
   githubToken: string;
   githubOrg: string;
   dockerImage: string;
+  /**
+   * Execution model inside the sandbox.
+   * v1 = single-session leader (default), v2 = leader + subagents via Task tool.
+   */
+  executionMode: ExecutionMode;
   /** Absolute path to the workspace root (contains world/, src/, …). */
   workspaceRoot: string;
 };
@@ -32,6 +43,7 @@ export const loadRuntimeConfig = (): RuntimeConfig => ({
   githubToken: process.env['VIBEGUILD_GITHUB_TOKEN'] ?? '',
   githubOrg: process.env['VIBEGUILD_GITHUB_ORG'] ?? 'vibeguild',
   dockerImage: process.env['SANDBOX_DOCKER_IMAGE'] ?? 'vibeguild-sandbox',
+  executionMode: (process.env['EXECUTION_MODE'] ?? 'v1') as ExecutionMode,
   workspaceRoot: process.env['WORKSPACE_ROOT'] ?? process.cwd(),
 });
 

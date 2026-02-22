@@ -16,13 +16,19 @@ export type SyncedProgress = {
   leaderId: string;
   worldDay: number;
   reportedAt: string;
-  status: 'in-progress' | 'completed' | 'failed' | 'blocked';
+  /**
+   * 'waiting_for_human' — leader is blocked on a decision and requires operator input
+   * before it can proceed. The entrypoint will pause and await an inbox response.
+   */
+  status: 'in-progress' | 'completed' | 'failed' | 'blocked' | 'waiting_for_human';
   summary: string;
   percentComplete: number;
   checkpoints: Array<{ at: string; sessionId?: string; description: string }>;
   blockers?: string[];
   escalations?: string[];
   sandboxRepoUrl?: string;
+  /** Present when status is 'waiting_for_human' — describes the specific question/decision */
+  question?: string;
 };
 
 export type AdapterOptions = {

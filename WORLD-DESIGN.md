@@ -165,8 +165,10 @@ Docker container
 Each subagent is a real independent AI execution — not a prompt persona.
 All subagents share the same `/workspace` volume mounts as the leader.
 
-> **Status:** Not yet started. Key unknown: whether GLM-5 will reliably invoke
-> the `Task` tool when instructed. Experiment planned.
+> **Status:** Implemented (experimental ✅). Set `EXECUTION_MODE=v2` to activate.
+> Key unknown: whether the configured model will reliably invoke the `Task` tool.
+> Test and observe. Falls back gracefully — if the model ignores the Task instructions,
+> it will just execute as a single session (v1 behavior).
 
 ---
 
@@ -332,7 +334,8 @@ This is achieved through continuous progress reporting from the sandbox to the w
  Sandbox container (entrypoint.mjs)
      │
      │  Leader writes world/tasks/{taskId}/progress.json after every meaningful step:
-     │    { status, percentComplete, summary, checkpoints: [{time, message}], artifacts }
+     │    { status, percentComplete, summary, checkpoints: [{time, message}], artifacts?,
+     │      question? }   ← question is present only when status='waiting_for_human'
      │
      │  Volume mount makes this a direct write to the host filesystem —
      │  no network, no copy, no delay.
@@ -381,25 +384,77 @@ Inverse direction (creator → container):
 
 ## Intervention Model
 
+Two directions of intervention: **creator-initiated** (you spot a problem) and
+**leader-initiated** (the being itself signals it needs guidance).
+
 ### Intervention Flow (ASCII)
 
 ```text
-Creator Action
-   |
-   +--> Pause task ----------> Control Plane ----------> Sandbox Runtime (pause)
-   |
-   +--> Resume task ---------> Control Plane ----------> Sandbox Runtime (resume)
-   |
-   +--> Inject instruction --> Control Plane ----------> Task inbox/runtime adapter
-   |
-   +--> Request checkpoint --> Control Plane ----------> Sync to world progress
+── Creator-initiated ────────────────────────────────────────────────────────
+
+  /pause --task <id> [msg]      Direct pause of ONE task + enter meetup dialogue.
+     │                          Container is frozen (docker pause). Leader state
+     │                          preserved. Optionally pre-injects a message.
+     │
+     ▼
+  /msg --task <id> <text>       Inject message into the frozen task's inbox.
+     │                          Leader reads it on resume.
+     │
+     ▼
+  /done                         Unfreeze. Container resumes from exact CPU state.
+
+── Leader-initiated (Human Alignment Protocol) ──────────────────────────────
+
+  Leader writes progress.json:
+    { status: "waiting_for_human", question: "<specific decision needed>", ... }
+     │
+     │  chokidar fires onProgress → host detects waiting_for_human
+     ▼
+  Host auto-pauses container + prints:
+    🤔 [aria→c54634e4] Task paused — leader needs your input:
+       "Should I target the v1 API or v2 API for the integration?"
+       ► Type your response, then /done to resume.
+     │
+     │  Creator types their response, then /done
+     ▼
+  Host injects response into inbox.json + resumes container.
+  Entrypoint detects resume, reads inbox, re-launches Claude with the answer.
+  Leader continues from percentComplete checkpoint.
+
+── Global meetup (all tasks) ────────────────────────────────────────────────
+
+  /meetup-freeze  (via signals.json / vg CLI)   Pause ALL tasks simultaneously.
+  /done                                          Resume all.
 ```
 
-Intervention remains first-class:
-- pause / resume task,
-- inject instruction,
-- request checkpoint,
-- escalate to creator.
+### Human Alignment Protocol (leader-initiated)
+
+The leader can signal that it needs operator input before proceeding. This is a
+**voluntary pause** — the leader writes `waiting_for_human` and stops immediately.
+
+Conditions for requesting alignment:
+- The task description is ambiguous in a way that would materially change the outcome.
+- A consequential binary choice has no clear winner from the task context.
+- External access or permissions are needed that the leader doesn't have.
+
+**Not** appropriate for minor choices, research decisions, or anything inferrable from context.
+
+Technical flow:
+1. Leader writes `status: "waiting_for_human"`, `question: "…"` to progress.json and exits.
+2. `chokidar` fires → `onProgress` detects the status → `runner.pause()` called.
+3. Creator reads the question in the console, types a response, then `/done`.
+4. Host writes response to `inbox.json`, calls `runner.resume()`.
+5. Entrypoint polls inbox, finds the answer, rebuilds the prompt with the answer,
+   re-launches Claude. Up to 3 alignment rounds per task before auto-failing.
+
+### /pause --task quick reference
+
+```
+/pause --task <id>               Freeze task immediately (no pre-message)
+/pause --task <id> <message>     Freeze + inject a message into inbox before resume
+/msg --task <id> <message>       Inject message into a running or frozen task
+/done                            Resume all frozen tasks (global or task-level)
+```
 
 Intervention should target world-task boundaries, while sandbox internals remain
 implementation details hidden behind runtime adapters.
