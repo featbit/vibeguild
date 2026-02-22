@@ -360,6 +360,10 @@ const run = async () => {
     const progress = await safeReadJson(join(TASK_DIR, 'progress.json'));
     if (!progress || progress.status !== 'waiting_for_human') break;
 
+    // Drain any stale inbox messages (e.g. the MEETUP REQUEST that triggered this alignment)
+    // before we start polling for the human's actual reply.
+    await drainInbox();
+
     const question = progress.question ?? progress.summary ?? '(no question provided)';
     console.log(`[sandbox] Alignment round ${round + 1}: "${question}"`);
     console.log(`[sandbox] Waiting for operator message (timeout: 30 min)…`);
