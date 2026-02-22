@@ -17,5 +17,59 @@
       "blake"
     ],
     "completedAt": "2026-02-21T16:56:46.083Z"
+  },
+  {
+    "id": "3c1975df-b53a-4adb-abdb-f34a8ae5c418",
+    "title": "写一篇关于 FeatBit 功能开关最佳实践的英文技术博客，要求：分 5 个章节，每章节有代码示例，内容长度不少于 1500 字。输出到 output/feature-flags-blog.md。任务不急，可以慢慢研究和写作。",
+    "description": "写一篇关于 FeatBit 功能开关最佳实践的英文技术博客，要求：分 5 个章节，每章节有代码示例，内容长度不少于 1500 字。输出到 output/feature-flags-blog.md。任务不急，可以慢慢研究和写作。",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-22T15:45:19.974Z",
+    "updatedAt": "2026-02-22T15:59:41.913Z",
+    "leaderId": "casey",
+    "assignedTo": [
+      "casey"
+    ],
+    "completedAt": "2026-02-22T15:59:41.913Z"
+  },
+  {
+    "id": "2c1d9ef9-ad4f-462b-ab56-95b174a0f03e",
+    "title": "写一篇关于 FeatBit 功能开关最佳实践的英文技术博客，要求：分 5 个章节，每章节有代码示例，内容长度不少于 1500 字。输出到 output/feature-flags-blog.md。任务不急，可以慢慢研究和写作。",
+    "description": "写一篇关于 FeatBit 功能开关最佳实践的英文技术博客，要求：分 5 个章节，每章节有代码示例，内容长度不少于 1500 字。输出到 output/feature-flags-blog.md。任务不急，可以慢慢研究和写作。",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-22T16:11:43.543Z",
+    "updatedAt": "2026-02-22T16:22:11.255Z",
+    "leaderId": "casey",
+    "assignedTo": [
+      "casey"
+    ],
+    "completedAt": "2026-02-22T16:22:11.255Z"
+  },
+  {
+    "id": "0cd3cd00-d300-4046-a62a-0d8541dc41a5",
+    "title": "分析 FeatBit 开源项目的 Geo（地理位置）功能现状，并提出优化建议。要求：1) 研究 FeatBit GitHub 仓库（https://github.com/featbit/featbit）中与 Geo 相关的代码和文档；2) 分析当前 Geo 功能的实现方式、局限性；3) 提出至少 5 个具体的优化方向，每个方向附带实现思路和代码示例；4) 输出完整分析报告到 output/featbit-geo-optimization.md，不少于 2000 字。任务不急，可以深入研究。",
+    "description": "分析 FeatBit 开源项目的 Geo（地理位置）功能现状，并提出优化建议。要求：1) 研究 FeatBit GitHub 仓库（https://github.com/featbit/featbit）中与 Geo 相关的代码和文档；2) 分析当前 Geo 功能的实现方式、局限性；3) 提出至少 5 个具体的优化方向，每个方向附带实现思路和代码示例；4) 输出完整分析报告到 output/featbit-geo-optimization.md，不少于 2000 字。任务不急，可以深入研究。",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-22T16:29:12.079Z",
+    "updatedAt": "2026-02-22T17:30:56.067Z",
+    "leaderId": "blake",
+    "assignedTo": [
+      "blake"
+    ],
+    "completedAt": "2026-02-22T17:30:56.067Z"
   }
 ]
