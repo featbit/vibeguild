@@ -1,3 +1,5 @@
+import { writeFile, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { program } from 'commander';
 import {
@@ -24,7 +26,7 @@ import {
   getAllTasks,
 } from './tasks/queue.js';
 import { createTaskRunner, type WorldTaskRunner } from './tasks/runner.js';
-import { loadRuntimeConfig } from './runtime/config.js';
+import { loadRuntimeConfig, worldPath } from './runtime/config.js';
 import {
   triggerMeetupFreeze,
   triggerMeetupResume,
@@ -327,6 +329,18 @@ const runWorldLoop = async (): Promise<void> => {
             ...(creatorMsg ? [`Creator's initial message: ${creatorMsg}`] : []),
           ].join(' ');
           runner.injectMessage(meetupMsg);
+          // Write pause.signal so the entrypoint's concurrent poller can kill Claude
+          // immediately — no reliance on the LLM reading and obeying the inbox message.
+          void (async () => {
+            const cfg = loadRuntimeConfig();
+            const taskDir = join(worldPath(cfg), 'tasks', fullId);
+            await mkdir(taskDir, { recursive: true });
+            await writeFile(
+              join(taskDir, 'pause.signal'),
+              JSON.stringify({ requestedAt: new Date().toISOString(), message: creatorMsg || 'Creator requested alignment' }, null, 2),
+              'utf-8',
+            );
+          })().catch(() => undefined);
           aligningTaskId = fullId;
           console.log(`\n⏸  Task ${fullId.slice(0, 8)}: meetup request sent to leader.`);
           console.log(`   Leader will stop at its next checkpoint and come align with you.`);

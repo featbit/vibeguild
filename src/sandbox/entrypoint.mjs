@@ -20,7 +20,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { writeFile, readFile, mkdir } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const TASK_ID = process.env['TASK_ID'] ?? '';
@@ -33,8 +33,24 @@ const SANDBOX_REPO_URL = process.env['SANDBOX_REPO_URL'] ?? '';
 const WORKSPACE = '/workspace';
 const WORLD_ROOT = join(WORKSPACE, 'world');
 const TASK_DIR = join(WORLD_ROOT, 'tasks', TASK_ID);
+const PAUSE_SIGNAL_PATH = join(TASK_DIR, 'pause.signal');
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Check if a pause.signal file was written by the host (world.ts /pause --task).
+ * If found, delete it and return its contents. Returns null if none pending.
+ */
+const readAndClearPauseSignal = async () => {
+  try {
+    const raw = await readFile(PAUSE_SIGNAL_PATH, 'utf-8');
+    const data = JSON.parse(raw);
+    await unlink(PAUSE_SIGNAL_PATH).catch(() => undefined);
+    return data;
+  } catch {
+    return null;
+  }
+};
 
 /**
  * @param {string} p
@@ -224,11 +240,16 @@ const buildV2Prompt = () => {
 // ─── claude invocation ────────────────────────────────────────────────────────
 
 /**
- * Spawn the Claude CLI with the given prompt.
+ * Spawn the Claude CLI with the given prompt. Concurrently polls for pause.signal
+ * (written by world.ts when the operator runs /pause --task).
+ *
+ * Returns 'done' if Claude exits cleanly, or 'paused' if a pause signal was
+ * detected and the process was killed — no LLM cooperation required.
+ *
  * @param {string} prompt
- * @returns {Promise<void>}
+ * @returns {Promise<'done' | 'paused'>}
  */
-const runClaude = async (prompt) => {
+const runClaudeInterruptible = async (prompt) => {
   const modelArgs = process.env['ANTHROPIC_MODEL']
     ? ['--model', process.env['ANTHROPIC_MODEL']]
     : [];
@@ -249,12 +270,36 @@ const runClaude = async (prompt) => {
     process.stderr.write(`[${LEADER_ID}:err] ${d.toString()}`);
   });
 
-  await new Promise((resolve, reject) => {
+  let killed = false;
+  let done = false;
+
+  /** @type {Promise<'done' | 'paused'>} */
+  const claudeFinished = new Promise((resolve, reject) => {
     proc.on('close', (code) => {
-      if (code === 0) resolve(undefined);
+      done = true;
+      if (killed) resolve('paused');
+      else if (code === 0) resolve('done');
       else reject(new Error(`claude exited with code ${code}`));
     });
   });
+
+  // Concurrent poller: checks for pause.signal every 2 s while Claude runs.
+  // Fire-and-forget — resolves only by side-effect (killing proc).
+  void (async () => {
+    while (!done) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (done) break;
+      const sig = await readAndClearPauseSignal();
+      if (sig) {
+        console.log(`[sandbox] ⏸ Pause signal received ("${sig.message ?? ''}"). Stopping Claude…`);
+        killed = true;
+        proc.kill('SIGTERM');
+        break;
+      }
+    }
+  })();
+
+  return claudeFinished;
 };
 
 /**
@@ -343,7 +388,22 @@ const run = async () => {
     : basePrompt;
 
   // ── First run ────────────────────────────────────────────────────────────
-  await runClaude(firstPrompt);
+  const firstResult = await runClaudeInterruptible(firstPrompt);
+
+  // If the host interrupted Claude via pause.signal, we own the waiting_for_human
+  // state. Write it ourselves so the alignment loop below can pick it up.
+  if (firstResult === 'paused') {
+    const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
+    const pauseMsgs = await drainInbox(); // grab the MEETUP msg for context (and clear it)
+    const pauseContext = pauseMsgs.length > 0 ? pauseMsgs.join(' ') : 'Creator requested alignment via /pause --task';
+    await writeProgress(
+      'waiting_for_human',
+      'Paused by creator for alignment',
+      pausedProgress?.percentComplete ?? 0,
+      { question: pauseContext },
+    );
+    console.log(`[sandbox] Written waiting_for_human. Entering alignment loop.`);
+  }
 
   // ── Human alignment conversation loop ────────────────────────────────────
   // The leader writes waiting_for_human when it needs operator input.
@@ -382,7 +442,19 @@ const run = async () => {
     alignHistory.push({ question, answer });
     console.log(`[sandbox] Operator message received. Re-launching leader with full conversation.`);
     await writeProgress('in-progress', 'Processing operator response…', progress.percentComplete ?? 0);
-    await runClaude(buildResumePrompt(answer, progress, alignHistory));
+    const resumeResult = await runClaudeInterruptible(buildResumePrompt(answer, progress, alignHistory));
+    // Handle mid-run pause during a resume session
+    if (resumeResult === 'paused') {
+      const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
+      const pauseMsgs = await drainInbox();
+      const pauseContext = pauseMsgs.length > 0 ? pauseMsgs.join(' ') : 'Creator requested alignment via /pause --task';
+      await writeProgress(
+        'waiting_for_human',
+        'Paused by creator for alignment (mid-resume)',
+        pausedProgress?.percentComplete ?? 0,
+        { question: pauseContext },
+      );
+    }
   }
 
   // ── Final progress sync ──────────────────────────────────────────────────

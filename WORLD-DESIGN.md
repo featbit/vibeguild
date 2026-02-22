@@ -391,7 +391,7 @@ Both converge on the same multi-turn alignment conversation.
 | | `/pause --task` | `waiting_for_human` |
 |---|---|---|
 | Who initiates | Creator | Leader |
-| How leader stops | Reads MEETUP REQUEST in inbox, stops at next checkpoint | Writes status and exits Claude process |
+| How leader stops | `pause.signal` file → entrypoint kills Claude via SIGTERM (no LLM needed) | Leader writes status and exits Claude process |
 | Container state | Running (no docker freeze) | Running |
 | Conversation | Multi-turn, same inbox/re-launch loop | Multi-turn, same inbox/re-launch loop |
 | End condition | Creator types `/done` | Leader writes `in-progress` (or creator types `/done`) |
@@ -468,12 +468,20 @@ Conditions for requesting alignment:
 
 **Not** appropriate for minor choices, research decisions, or anything inferrable from context.
 
-Technical flow:
-1. Leader writes `status: "waiting_for_human"`, `question: "…"` to progress.json and exits.
+Technical flow — `/pause --task` (operator-initiated):
+1. `world.ts` writes `world/tasks/{id}/pause.signal` and sets `aligningTaskId`.
+2. Inside the container, `runClaudeInterruptible()` polls for `pause.signal` every 2 s
+   concurrently while Claude runs. When detected: signal file is deleted, Claude is killed
+   via SIGTERM — **no LLM cooperation needed**.
+3. Entrypoint writes `waiting_for_human` to progress.json itself (with the MEETUP message
+   as the question) and enters the alignment loop.
+4. `chokidar` on the host detects `waiting_for_human` → host shows `🤔` prompt.
+
+Technical flow — leader-initiated (`waiting_for_human`):
+1. Leader writes `status: "waiting_for_human"`, `question: "…"` to progress.json and exits Claude.
 2. `chokidar` fires → `onProgress` detects the status → host enters **alignment mode**.
-   Container is **not paused**. All terminal input routes to `inbox.json`.
-3. Entrypoint alignment loop drains the inbox (clearing any stale MEETUP REQUEST that
-   triggered this round), then waits for a fresh operator message (30 min timeout).
+3. Entrypoint alignment loop drains the inbox (clearing any stale messages), then waits for
+   a fresh operator message (30 min timeout).
 4. Operator types reply → message written to inbox → entrypoint reads it → re-launches
    Claude with full conversation history (`alignHistory[]` array).
 5. Claude processes, writes `in-progress` (done) or `waiting_for_human` (follow-up).
