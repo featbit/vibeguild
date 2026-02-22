@@ -444,7 +444,8 @@ const run = async () => {
 
     alignHistory.push({ question, answer });
     console.log(`[sandbox] Operator message received. Re-launching leader with full conversation.`);
-    await writeProgress('in-progress', 'Processing operator response…', progress.percentComplete ?? 0);
+    // Do NOT write in-progress here — that would immediately exit world.ts alignment mode.
+    // Let Claude decide: write waiting_for_human (acknowledgment/follow-up) or in-progress (proceed).
     const resumeResult = await runClaudeInterruptible(buildResumePrompt(answer, progress, alignHistory));
     // Handle mid-run pause during a resume session
     if (resumeResult === 'paused') {

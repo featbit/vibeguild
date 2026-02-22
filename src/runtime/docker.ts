@@ -178,6 +178,10 @@ export const createDockerSandboxAdapter = (
       ];
 
       await updateTaskStatus(taskId, 'in-progress', task.assignedTo);
+
+      // Remove any leftover container with the same name (e.g. from a previous crashed run).
+      await execAsync(`docker rm -f ${containerName}`).catch(() => undefined);
+
       ctx.containerId = await dockerRunDetached(dockerArgs);
       console.log(`\n🐳 [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} started.`);
 
