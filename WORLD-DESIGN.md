@@ -386,22 +386,32 @@ Inverse direction (creator → container):
 
 Two directions of intervention: **creator-initiated** (you spot a problem) and
 **leader-initiated** (the being itself signals it needs guidance).
+Both converge on the same multi-turn alignment conversation.
+
+| | `/pause --task` | `waiting_for_human` |
+|---|---|---|
+| Who initiates | Creator | Leader |
+| How leader stops | Reads MEETUP REQUEST in inbox, stops at next checkpoint | Writes status and exits Claude process |
+| Container state | Running (no docker freeze) | Running |
+| Conversation | Multi-turn, same inbox/re-launch loop | Multi-turn, same inbox/re-launch loop |
+| End condition | Creator types `/done` | Leader writes `in-progress` (or creator types `/done`) |
 
 ### Intervention Flow (ASCII)
 
 ```text
 ── Creator-initiated ────────────────────────────────────────────────────────
 
-  /pause --task <id> [msg]      Direct pause of ONE task + enter meetup dialogue.
-     │                          Container is frozen (docker pause). Leader state
-     │                          preserved. Optionally pre-injects a message.
+  /pause --task <id> [msg]      Send a MEETUP REQUEST to the leader's inbox.
+     │                          Leader finishes its current tool call, then
+     │                          stops, writes waiting_for_human, and comes
+     │                          to align. Same multi-turn conversation as
+     │                          leader-initiated alignment.
      │
      ▼
-  /msg --task <id> <text>       Inject message into the frozen task's inbox.
-     │                          Leader reads it on resume.
+  (alignment mode — same as leader-initiated, see below)
      │
      ▼
-  /done                         Unfreeze. Container resumes from exact CPU state.
+  /done                         End alignment. Leader resumes the task.
 
 ── Leader-initiated (Human Alignment Protocol) ──────────────────────────────────────────────────
 
@@ -470,18 +480,20 @@ Technical flow:
 ### /pause --task and alignment quick reference
 
 ```
-/pause --task <id>               Freeze task immediately (no pre-message)
-/pause --task <id> <message>     Freeze + inject a message into inbox before resume
-/msg --task <id> <message>       Inject message into a running or frozen task
-/done                            During alignment: send "proceed independently" + exit alignment mode.
-                                 During /pause-freeze: resume all frozen tasks.
+/pause --task <id>               Ask leader to stop and align (sends a MEETUP REQUEST to inbox).
+/pause --task <id> <message>     Same + include your opening message.
+/msg --task <id> <message>       Inject a one-off message to a running task (no alignment mode).
+/done                            End alignment. Leader resumes the task independently.
 ```
 
-When in **alignment mode** (leader wrote `waiting_for_human`):
+When in **alignment mode** (either side initiated it):
 - You do NOT need `/msg --task` — just type your message directly.
 - Each message you type is sent immediately to the task's inbox.
-- Claude re-launches after each message with the full conversation history.
-- Type `/done` to end the conversation and tell Claude to proceed on its own.
+- Leader re-launches after each message with the full conversation history.
+- Type `/done` to end the conversation and tell the leader to proceed on its own.
+
+Both `/pause --task` and `waiting_for_human` enter the same alignment mode.
+The only difference is who initiated it — you or the leader.
 
 Intervention should target world-task boundaries, while sandbox internals remain
 implementation details hidden behind runtime adapters.

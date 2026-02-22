@@ -305,26 +305,34 @@ const runWorldLoop = async (): Promise<void> => {
       return;
     }
 
-    // /pause --task <id> [optional message] — freeze a specific task and enter meetup mode
+    // /pause --task <id> [optional message] — request alignment with a specific task
+    // Does NOT docker-pause the container. Instead injects a MEETUP REQUEST into
+    // the leader's inbox so it can finish its current tool call, stop gracefully,
+    // and enter a multi-turn alignment conversation with the creator.
     const taskPauseMatch = input.match(/^\/pause --task ([a-f0-9-]+)(.*)?$/);
     if (taskPauseMatch) {
       const [, rawId, rest] = taskPauseMatch;
-      const optMsg = rest?.trim() ?? '';
+      const creatorMsg = rest?.trim() ?? '';
       const fullId = activeRunners.has(rawId)
         ? rawId
         : [...activeRunners.keys()].find((id) => id.startsWith(rawId));
       if (fullId) {
         const runner = activeRunners.get(fullId)!;
-        if (runner.isRunning) {
-          void runner.pause();
-          if (!frozenTaskIds.includes(fullId)) frozenTaskIds.push(fullId);
-          console.log(`\n⏸  Task ${fullId.slice(0, 8)} paused for meetup.`);
-          console.log(`   Use /msg --task ${fullId.slice(0, 8)} <message> to send corrections.`);
-          console.log(`   Type /done to resume.\n`);
-          if (optMsg) void activeRunners.get(fullId)!.injectMessage(optMsg);
+        if (!runner.isFinished) {
+          const meetupMsg = [
+            `[MEETUP REQUEST] The creator wants to align with you.`,
+            `Please stop all current work immediately.`,
+            `Write progress.json with status="waiting_for_human", a brief summary of what you were doing, and a "question" field acknowledging you are ready to align.`,
+            `Then wait — do not continue the task until the creator says so.`,
+            ...(creatorMsg ? [`Creator's initial message: ${creatorMsg}`] : []),
+          ].join(' ');
+          runner.injectMessage(meetupMsg);
+          aligningTaskId = fullId;
+          console.log(`\n⏸  Task ${fullId.slice(0, 8)}: meetup request sent to leader.`);
+          console.log(`   Leader will stop at its next checkpoint and come align with you.`);
+          console.log(`   Type your messages directly. Type /done when you're done.\n`);
         } else {
-          const stateStr = runner.isPaused ? 'paused' : runner.isFinished ? 'finished' : 'idle';
-          console.log(`\n⚠️  Task ${fullId.slice(0, 8)} is not currently running (state: ${stateStr}).\n`);
+          console.log(`\n⚠️  Task ${fullId.slice(0, 8)} is already finished.\n`);
         }
       } else {
         console.log(`\n⚠️  No active runner found for task ${rawId}\n`);
