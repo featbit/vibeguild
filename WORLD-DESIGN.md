@@ -403,23 +403,32 @@ Two directions of intervention: **creator-initiated** (you spot a problem) and
      ▼
   /done                         Unfreeze. Container resumes from exact CPU state.
 
-── Leader-initiated (Human Alignment Protocol) ──────────────────────────────
+── Leader-initiated (Human Alignment Protocol) ──────────────────────────────────────────────────
 
   Leader writes progress.json:
     { status: "waiting_for_human", question: "<specific decision needed>", ... }
      │
      │  chokidar fires onProgress → host detects waiting_for_human
      ▼
-  Host auto-pauses container + prints:
-    🤔 [aria→c54634e4] Task paused — leader needs your input:
+  Host prints:
+    🤔 [aria→c54634e4] Leader needs your input:
        "Should I target the v1 API or v2 API for the integration?"
-       ► Type your response, then /done to resume.
+       ► Type your reply. Type /done to let leader proceed independently.
      │
-     │  Creator types their response, then /done
+     │  Container stays RUNNING (not docker-paused).
+     │  entrypoint is actively polling inbox.json every 3 seconds.
+     │
+     │  ← Human types reply (can be multi-turn)
      ▼
-  Host injects response into inbox.json + resumes container.
-  Entrypoint detects resume, reads inbox, re-launches Claude with the answer.
-  Leader continues from percentComplete checkpoint.
+  Everything human types goes straight to inbox.json (alignment mode).
+  entrypoint reads the message → re-launches Claude with full conversation history.
+     │
+     │  Claude either:
+     │   (a) writes status="in-progress" → resumes task normally → alignment over
+     │   (b) writes status="waiting_for_human" again → next question shown
+     ▼
+  Conversation continues until leader is satisfied.
+  /done at any point sends "proceed with your best judgment" and exits alignment mode.
 
 ── Global meetup (all tasks) ────────────────────────────────────────────────
 
@@ -430,7 +439,17 @@ Two directions of intervention: **creator-initiated** (you spot a problem) and
 ### Human Alignment Protocol (leader-initiated)
 
 The leader can signal that it needs operator input before proceeding. This is a
-**voluntary pause** — the leader writes `waiting_for_human` and stops immediately.
+**voluntary pause** — the leader writes `waiting_for_human` and exits the current
+Claude session. The container stays running; `entrypoint.mjs` polls `inbox.json`.
+
+The alignment is a **multi-turn conversation**, not a single Q&A handshake:
+- Each message the operator sends triggers a fresh Claude re-launch.
+- Claude receives the full conversation history on each re-launch.
+- Claude can ask follow-up questions (write `waiting_for_human` again) as many
+  times as needed until it has enough clarity to proceed.
+- When Claude is ready, it writes `status: "in-progress"` and continues the task.
+- The operator can type `/done` at any time to inject a "proceed independently"
+  message and exit alignment mode without waiting for Claude to ask again.
 
 Conditions for requesting alignment:
 - The task description is ambiguous in a way that would materially change the outcome.
@@ -441,20 +460,28 @@ Conditions for requesting alignment:
 
 Technical flow:
 1. Leader writes `status: "waiting_for_human"`, `question: "…"` to progress.json and exits.
-2. `chokidar` fires → `onProgress` detects the status → `runner.pause()` called.
-3. Creator reads the question in the console, types a response, then `/done`.
-4. Host writes response to `inbox.json`, calls `runner.resume()`.
-5. Entrypoint polls inbox, finds the answer, rebuilds the prompt with the answer,
-   re-launches Claude. Up to 3 alignment rounds per task before auto-failing.
+2. `chokidar` fires → `onProgress` detects the status → host enters **alignment mode**.
+   Container is **not paused**. All terminal input routes to `inbox.json`.
+3. Operator types reply → message written to inbox → entrypoint reads it → re-launches
+   Claude with full conversation history (`alignHistory[]` array).
+4. Claude processes, writes `in-progress` (done) or `waiting_for_human` (follow-up).
+5. Loop continues. Safety cap: 20 rounds maximum before auto-fail.
 
-### /pause --task quick reference
+### /pause --task and alignment quick reference
 
 ```
 /pause --task <id>               Freeze task immediately (no pre-message)
 /pause --task <id> <message>     Freeze + inject a message into inbox before resume
 /msg --task <id> <message>       Inject message into a running or frozen task
-/done                            Resume all frozen tasks (global or task-level)
+/done                            During alignment: send "proceed independently" + exit alignment mode.
+                                 During /pause-freeze: resume all frozen tasks.
 ```
+
+When in **alignment mode** (leader wrote `waiting_for_human`):
+- You do NOT need `/msg --task` — just type your message directly.
+- Each message you type is sent immediately to the task's inbox.
+- Claude re-launches after each message with the full conversation history.
+- Type `/done` to end the conversation and tell Claude to proceed on its own.
 
 Intervention should target world-task boundaries, while sandbox internals remain
 implementation details hidden behind runtime adapters.

@@ -138,6 +138,13 @@ const runWorldLoop = async (): Promise<void> => {
   let schedulerBusy = false;
   let orchestratorBusy = false; // true while SDK assignment call is in-flight
 
+  /**
+   * When non-null, the user is in an alignment dialogue with this task.
+   * All plain terminal input is routed directly to that task's inbox instead
+   * of being treated as an Orchestrator message.
+   */
+  let aligningTaskId: string | null = null;
+
   // Shared base options for all query() calls
   const mcpServer = await createWorldMcpServer();
   const baseOptions: Record<string, unknown> = {
@@ -166,17 +173,22 @@ const runWorldLoop = async (): Promise<void> => {
       console.log(`\n📍 [${p.leaderId}→${short}] ${bar} ${pct}% — ${p.summary}`);
       if (latestMsg) console.log(`     ↳ ${latestMsg}`);
 
-      // Auto-pause when leader requests human alignment
-      if (p.status === 'waiting_for_human') {
-        const runner = activeRunners.get(p.taskId);
-        if (runner && runner.isRunning && !frozenTaskIds.includes(p.taskId)) {
-          void runner.pause();
-          frozenTaskIds.push(p.taskId);
-          const question = p.question ?? p.summary;
-          console.log(`\n🤔 [${p.leaderId}→${short}] Task paused — leader needs your input:`);
-          console.log(`   "${question}"`);
-          console.log(`   ► Type your response, then /done to resume.\n`);
-        }
+      // Enter alignment mode when leader needs human input.
+      // Do NOT docker-pause the container — entrypoint is actively polling inbox.
+      // All terminal input will be routed directly to this task's inbox until
+      // the leader resumes on its own (writes status != 'waiting_for_human').
+      if (p.status === 'waiting_for_human' && aligningTaskId !== p.taskId) {
+        aligningTaskId = p.taskId;
+        const question = p.question ?? p.summary;
+        console.log(`\n🤔 [${p.leaderId}→${short}] Leader needs your input:`);
+        console.log(`   "${question}"`);
+        console.log(`   ► Type your reply (press Enter to send). Type /done to let leader proceed independently.\n`);
+      }
+
+      // Auto-exit alignment mode when leader resumes on its own
+      if (aligningTaskId === p.taskId && p.status !== 'waiting_for_human') {
+        aligningTaskId = null;
+        console.log(`\n✅ [${p.leaderId}→${short}] Leader alignment resolved. Resuming task.\n`);
       }
     },
     onComplete: (taskId: string) => { activeRunners.delete(taskId); },
@@ -220,6 +232,19 @@ const runWorldLoop = async (): Promise<void> => {
 
     // /done or /resume — end meetup
     if (input === '/done' || input === '/resume') {
+      // If in alignment mode, send a "proceed" message and exit alignment
+      if (aligningTaskId) {
+        const tid = aligningTaskId;
+        aligningTaskId = null;
+        const runner = activeRunners.get(tid);
+        if (runner) {
+          runner.injectMessage(
+            '[Operator ended alignment] Proceed with your best judgment based on the conversation so far.',
+          );
+          console.log(`\n▶️  Alignment ended for task ${tid.slice(0, 8)}. Leader will proceed independently.\n`);
+        }
+        return;
+      }
       if (frozenTaskIds.length > 0) {
         // Resume task-specific frozen runners
         void (async () => {
@@ -303,6 +328,19 @@ const runWorldLoop = async (): Promise<void> => {
         }
       } else {
         console.log(`\n⚠️  No active runner found for task ${rawId}\n`);
+      }
+      return;
+    }
+
+    // When in alignment mode, all free-form input goes to the task's inbox
+    if (aligningTaskId) {
+      const runner = activeRunners.get(aligningTaskId);
+      if (runner) {
+        runner.injectMessage(input);
+        console.log(`\n💬 [→ task ${aligningTaskId.slice(0, 8)}] ${input}\n`);
+      } else {
+        aligningTaskId = null;
+        console.log(`\n⚠️  Alignment task no longer active. Exiting alignment mode.\n`);
       }
       return;
     }

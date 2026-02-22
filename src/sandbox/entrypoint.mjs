@@ -275,24 +275,42 @@ const waitForInboxResponse = async (timeoutMs) => {
 
 /**
  * Build the continuation prompt used when re-launching after a waiting_for_human pause.
- * @param {string} humanAnswer
- * @param {object} prevProgress
+ * @param {string} humanAnswer  The latest human message
+ * @param {object} prevProgress  The progress snapshot that triggered alignment
+ * @param {Array<{question: string, answer: string}>} history  All prior alignment turns
  * @returns {string}
  */
-const buildResumePrompt = (humanAnswer, prevProgress) => {
+const buildResumePrompt = (humanAnswer, prevProgress, history) => {
   const base = EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt();
+  const historyLines = history.length > 1
+    ? [
+        ``,
+        `--- ALIGNMENT CONVERSATION HISTORY ---`,
+        ...history.slice(0, -1).flatMap(({ question, answer }) => [
+          `Leader asked: "${question}"`,
+          `Operator replied: "${answer}"`,
+          ``,
+        ]),
+        `---`,
+      ]
+    : [];
   return [
     base,
+    ...historyLines,
     ``,
-    `--- ALIGNMENT RESPONSE FROM OPERATOR ---`,
+    `--- OPERATOR RESPONSE ---`,
     `You previously paused to request human alignment. The operator has responded:`,
     ``,
-    `> ${humanAnswer}`,
+    `Your question was: "${prevProgress?.question ?? prevProgress?.summary ?? '(unknown)'}"`,
+    `Operator says: "${humanAnswer}"`,
     ``,
-    `Your last recorded progress: ${prevProgress?.percentComplete ?? 0}% — ${prevProgress?.summary ?? 'unknown'}`,
+    `Your progress before pausing: ${prevProgress?.percentComplete ?? 0}% — ${prevProgress?.summary ?? 'unknown'}`,
     ``,
-    `Resume the task from where you left off, incorporating the operator's guidance above.`,
-    `Do not restart from scratch — pick up where you stopped.`,
+    `If this response is sufficient: resume the task by writing status="in-progress" to progress.json,`,
+    `then CONTINUE from where you stopped. Do NOT restart.`,
+    ``,
+    `If you still need clarification: write status="waiting_for_human" again with a new "question" field.`,
+    `Keep follow-ups concise and specific. You can exchange multiple messages before continuing.`,
     `---`,
   ].join('\n');
 };
@@ -300,6 +318,13 @@ const buildResumePrompt = (humanAnswer, prevProgress) => {
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 const EXECUTION_MODE = process.env['EXECUTION_MODE'] ?? 'v1';
+
+/**
+ * Max alignment rounds as a safety brake (not a UX limit).
+ * Each round = operator sends one or more messages, leader processes and either
+ * asks a follow-up or resumes. Set high so natural conversations are not cut off.
+ */
+const MAX_ALIGNMENT_ROUNDS = 20;
 
 const run = async () => {
   if (!TASK_ID) {
@@ -320,19 +345,25 @@ const run = async () => {
   // ── First run ────────────────────────────────────────────────────────────
   await runClaude(firstPrompt);
 
-  // ── Human alignment loop ─────────────────────────────────────────────────
-  // If Claude wrote waiting_for_human, pause and wait for the operator's response,
-  // then re-launch with the answer. Repeat up to 3 times.
-  const MAX_ALIGNMENT_ROUNDS = 3;
+  // ── Human alignment conversation loop ────────────────────────────────────
+  // The leader writes waiting_for_human when it needs operator input.
+  // The host (world.ts) stays unpaused and routes terminal input to inbox.json.
+  // Each time the operator sends a message, entrypoint re-launches Claude with
+  // the full conversation history so the leader can ask follow-ups or confirm.
+  // The loop exits when leader writes any status other than waiting_for_human.
+  //
+  // Timeout per message wait: 30 min. Safety cap: MAX_ALIGNMENT_ROUNDS rounds.
+  /** @type {Array<{question: string, answer: string}>} */
+  const alignHistory = [];
+
   for (let round = 0; round < MAX_ALIGNMENT_ROUNDS; round++) {
     const progress = await safeReadJson(join(TASK_DIR, 'progress.json'));
     if (!progress || progress.status !== 'waiting_for_human') break;
 
     const question = progress.question ?? progress.summary ?? '(no question provided)';
-    console.log(`[sandbox] Leader requested alignment (round ${round + 1}): "${question}"`);
-    console.log(`[sandbox] Waiting for operator response (timeout: 30 min)…`);
+    console.log(`[sandbox] Alignment round ${round + 1}: "${question}"`);
+    console.log(`[sandbox] Waiting for operator message (timeout: 30 min)…`);
 
-    // 30-minute timeout per alignment round
     const answer = await waitForInboxResponse(30 * 60 * 1000);
     if (!answer) {
       console.error('[sandbox] Timed out waiting for human alignment. Marking task failed.');
@@ -344,9 +375,10 @@ const run = async () => {
       process.exit(1);
     }
 
-    console.log(`[sandbox] Operator responded. Re-launching with guidance.`);
-    await writeProgress('in-progress', 'Resuming after human alignment.', progress.percentComplete ?? 0);
-    await runClaude(buildResumePrompt(answer, progress));
+    alignHistory.push({ question, answer });
+    console.log(`[sandbox] Operator message received. Re-launching leader with full conversation.`);
+    await writeProgress('in-progress', 'Processing operator response…', progress.percentComplete ?? 0);
+    await runClaude(buildResumePrompt(answer, progress, alignHistory));
   }
 
   // ── Final progress sync ──────────────────────────────────────────────────
