@@ -9,6 +9,7 @@
     "meetup": "node --env-file=.env --import tsx src/world.ts meetup",
     "status": "node --env-file=.env --import tsx src/world.ts status",
     "vg": "node scripts/vg.mjs",
+    "setup": "node --env-file=.env scripts/vg-setup.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

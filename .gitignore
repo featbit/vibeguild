@@ -44,6 +44,9 @@ world/tasks/*
 # Output deliverables
 output/
 
+# Shared MCP registry — contains auth tokens, never commit
+world/shared/mcp-servers.json
+
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db

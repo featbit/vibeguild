@@ -22,6 +22,7 @@
 import { spawn } from 'node:child_process';
 import { writeFile, readFile, mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { getMcpServers } from './mcp-servers.mjs';
 
 const TASK_ID = process.env['TASK_ID'] ?? '';
 const TASK_TITLE = decodeURIComponent(process.env['TASK_TITLE'] ?? 'Untitled task');
@@ -147,6 +148,10 @@ const buildPrompt = () => {
     `   If inbox has messages, acknowledge them and incorporate the guidance before continuing.`,
     `4. When done: write status "completed" (or "failed") in progress.json.`,
     ``,
+    `### Shared skills`,
+    `Before starting, read any skill files in world/shared/skills/ (if the directory exists).`,
+    `These are operator-authored best practices for this world — follow them throughout the task.`,
+    ``,
     `### Human Alignment Protocol (use sparingly, only for consequential blockers)`,
     `If you are uncertain about a decision that is CONSEQUENTIAL and you cannot proceed without`,
     `the human's input:`,
@@ -237,6 +242,35 @@ const buildV2Prompt = () => {
   return lines.join('\n');
 };
 
+// ─── MCP config ───────────────────────────────────────────────────────────────
+
+/**
+ * Write /tmp/vibeguild-mcp.json from the world-shared server definitions
+ * (src/sandbox/mcp-servers.mjs) and return the config file path.
+ *
+ * @returns {Promise<string>}
+ */
+const setupMcpConfig = async () => {
+  const hardcoded = getMcpServers(process.env);
+
+  // Merge with operator-added dynamic servers from world/shared/mcp-servers.json.
+  // Dynamic entries override hardcoded ones if names collide.
+  let dynamic = {};
+  try {
+    const raw = await readFile('/workspace/world/shared/mcp-servers.json', 'utf-8');
+    dynamic = JSON.parse(raw);
+  } catch {
+    // File doesn't exist or isn't valid JSON — use only hardcoded servers
+  }
+
+  const mcpServers = { ...hardcoded, ...dynamic };
+  const config = { mcpServers };
+  const configPath = '/tmp/vibeguild-mcp.json';
+  await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+  console.log(`[sandbox] MCP config written: ${configPath} (${Object.keys(mcpServers).length} server(s))`);
+  return configPath;
+};
+
 // ─── claude invocation ────────────────────────────────────────────────────────
 
 /**
@@ -247,15 +281,17 @@ const buildV2Prompt = () => {
  * detected and the process was killed — no LLM cooperation required.
  *
  * @param {string} prompt
+ * @param {string|null} [mcpConfigPath]
  * @returns {Promise<'done' | 'paused'>}
  */
-const runClaudeInterruptible = async (prompt) => {
+const runClaudeInterruptible = async (prompt, mcpConfigPath = null) => {
   const modelArgs = process.env['ANTHROPIC_MODEL']
     ? ['--model', process.env['ANTHROPIC_MODEL']]
     : [];
+  const mcpArgs = mcpConfigPath ? ['--mcp-config', mcpConfigPath] : [];
   const proc = spawn(
     'claude',
-    ['--dangerously-skip-permissions', ...modelArgs, '-p', prompt],
+    ['--dangerously-skip-permissions', ...modelArgs, ...mcpArgs, '-p', prompt],
     {
       cwd: WORKSPACE,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -383,6 +419,9 @@ const run = async () => {
   console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE} (mode: ${EXECUTION_MODE})`);
   await writeProgress('in-progress', 'Sandbox agent starting…', 0);
 
+  // Set up world-shared MCP servers (web search, etc.) before launching claude
+  const mcpConfigPath = await setupMcpConfig();
+
   // Check for any messages already in inbox before launching claude
   const initialMsgs = await drainInbox();
   const basePrompt = EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt();
@@ -390,8 +429,8 @@ const run = async () => {
     ? `${basePrompt}\n\n--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
     : basePrompt;
 
-  // ── First run ────────────────────────────────────────────────────────────
-  const firstResult = await runClaudeInterruptible(firstPrompt);
+  // ── First run ────────────────────────────────────────────────────────────────────
+  const firstResult = await runClaudeInterruptible(firstPrompt, mcpConfigPath);
 
   // If the host interrupted Claude via pause.signal, we own the waiting_for_human
   // state. Write it ourselves so the alignment loop below can pick it up.
@@ -446,7 +485,7 @@ const run = async () => {
     console.log(`[sandbox] Operator message received. Re-launching leader with full conversation.`);
     // Do NOT write in-progress here — that would immediately exit world.ts alignment mode.
     // Let Claude decide: write waiting_for_human (acknowledgment/follow-up) or in-progress (proceed).
-    const resumeResult = await runClaudeInterruptible(buildResumePrompt(answer, progress, alignHistory));
+    const resumeResult = await runClaudeInterruptible(buildResumePrompt(answer, progress, alignHistory), mcpConfigPath);
     // Handle mid-run pause during a resume session
     if (resumeResult === 'paused') {
       const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));

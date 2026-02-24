@@ -309,8 +309,10 @@ Host path                                    Container path                     
 world/memory/world.json                  →   /workspace/world/memory/world.json      :ro
 world/tasks/{taskId}/                    →   /workspace/world/tasks/{taskId}/         :rw
 world/beings/{assignedId}/  (×N beings)  →   /workspace/world/beings/{assignedId}/   :rw
+world/shared/                            →   /workspace/world/shared/                 :ro
 output/                                  →   /workspace/output/                       :rw
 src/sandbox/entrypoint.mjs              →   /workspace/src/sandbox/entrypoint.mjs   :ro
+src/sandbox/mcp-servers.mjs             →   /workspace/src/sandbox/mcp-servers.mjs  :ro
 AGENTS.md                                →   /workspace/AGENTS.md                    :ro
 ```
 
@@ -321,10 +323,19 @@ AGENTS.md                                →   /workspace/AGENTS.md             
 | Write progress.json for its task | ✅ | `/workspace/world/tasks/{taskId}/` is rw |
 | Read dayCount from world.json | ✅ | `/workspace/world/memory/world.json` is ro |
 | Update its own beings' profile.json | ✅ | `/workspace/world/beings/{id}/` is rw |
+| Call tools / MCP servers | ✅ | World-shared tools injected at startup via `--mcp-config` |
 | Read or write another task's progress | ❌ | That task dir is not mounted |
 | Read or write another being's memory | ❌ | That being dir is not mounted |
 | Modify source code | ❌ | `src/` is not mounted (only entrypoint.mjs ro) |
 | Read world queue / task list | ❌ | `world/tasks/queue.json` is not mounted |
+
+### World-shared Tools and MCP Servers
+
+Sandbox beings can call tools and MCP servers. World-shared servers are configured
+once in `entrypoint.mjs` (`setupMcpConfig()`) and applied to every `claude` invocation
+via `--mcp-config`. Authorization tokens reuse existing env vars — no extra secrets.
+
+To add a new MCP server or tool: add an entry to `src/sandbox/mcp-servers.mjs` (hardcoded world defaults) or use `npm run setup` in a separate terminal for the conversational setup assistant (persisted to `world/shared/mcp-servers.json`) — no other files need to change.
 
 ### Sync mechanism (real-time)
 
@@ -493,6 +504,25 @@ Technical flow — leader-initiated (`waiting_for_human`):
 6. Operator confirms ("可以" / "proceed") → Claude writes `in-progress` → loop exits.
 7. Safety cap: 20 rounds maximum before auto-fail.
 
+### World Setup Assistant
+
+A separate conversational interface for configuring world-shared resources.
+Run in any terminal **independent of `npm start`**:
+
+```sh
+npm run setup
+```
+
+The assistant speaks natural language — you describe what you want and it handles the details.
+Capabilities:
+- List, add, remove MCP servers (persisted to `world/shared/mcp-servers.json`)
+- **Test** whether an MCP endpoint actually responds before committing it
+- Add, remove shared skill files (`world/shared/skills/`)
+
+MCP changes take effect for **new** sandbox tasks; running containers are unaffected.
+
+> `world/shared/mcp-servers.json` is **gitignored** — it may contain auth tokens and must not be committed.
+
 ### /pause --task and alignment quick reference
 
 ```
@@ -500,6 +530,8 @@ Technical flow — leader-initiated (`waiting_for_human`):
 /pause --task <id> <message>     Same + include your opening message.
 /msg --task <id> <message>       Inject a one-off message to a running task (no alignment mode).
 /done                            End alignment. Leader resumes the task independently.
+
+# MCP servers and shared skills are managed via: npm run setup (separate terminal)
 ```
 
 When in **alignment mode** (either side initiated it):

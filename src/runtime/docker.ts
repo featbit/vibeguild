@@ -133,8 +133,10 @@ export const createDockerSandboxAdapter = (
       // Pre-create host-side directories so Docker doesn't create them as root-owned.
       const taskDir    = join(wPath, 'tasks', taskId);
       const beingsRoot = join(wPath, 'beings');
+      const sharedDir  = join(wPath, 'shared');
       const assignedBeings = task.assignedTo ?? [leaderId];
       await mkdir(taskDir, { recursive: true });
+      await mkdir(sharedDir, { recursive: true });
       await Promise.all(assignedBeings.map((id) => mkdir(join(beingsRoot, id), { recursive: true })));
 
       // Per-being mounts: only the assigned beings' directories are writable.
@@ -153,6 +155,10 @@ export const createDockerSandboxAdapter = (
         '-v', `${join(cfg.workspaceRoot, 'AGENTS.md')}:/workspace/AGENTS.md:ro`,
         // Sandbox entrypoint script
         '-v', `${join(cfg.workspaceRoot, 'src', 'sandbox', 'entrypoint.mjs')}:/workspace/src/sandbox/entrypoint.mjs:ro`,
+        // World-shared MCP / tool definitions (add new servers to this file)
+        '-v', `${join(cfg.workspaceRoot, 'src', 'sandbox', 'mcp-servers.mjs')}:/workspace/src/sandbox/mcp-servers.mjs:ro`,
+        // World-shared skills and dynamic MCP registry (operator-added at runtime)
+        '-v', `${join(wPath, 'shared')}:/workspace/world/shared:ro`,
         // ── Read-write: this task only ──────────────────────────────────
         // progress.json and inbox.json for this specific task
         '-v', `${taskDir}:/workspace/world/tasks/${taskId}`,
