@@ -63,6 +63,20 @@ npm start
 All operator commands (`/task`, `/pause --task`, etc.) must be typed into **this same terminal**
 — not a separate PowerShell window.
 
+### Managing MCP tools and shared skills
+
+Use a **separate terminal** for setup operations:
+
+```sh
+npm run setup
+```
+
+`npm run setup` is the only operator flow for world-shared MCP/tool and skill management
+(add/list/remove + MCP connection test).
+
+- Do **not** add/remove MCP or skills from the `npm start` world command console.
+- Changes are persisted to `world/shared/` and apply to **new** sandbox tasks.
+
 ### Creating a task
 
 ```
@@ -101,6 +115,7 @@ Wait for `📋 Task added: <uuid>` and then `🚀 [World] Starting runner` befor
 
 - **Do NOT** type `/pause --task` in a separate PowerShell window — it must be in the `npm start` terminal.
 - **Do NOT** issue `/pause --task` before the first `📍` appears — the container may not be running yet.
+- **Do NOT** run `/task` or `/pause` inside the `npm run setup` terminal; setup terminal is only for MCP/skill configuration.
 - If alignment resolves immediately without a `🤔` prompt, it means the previous Claude process
   had already written `in-progress` before the signal arrived. Just issue `/pause --task` again
   on the same task — it re-enters alignment mode.

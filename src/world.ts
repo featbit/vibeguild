@@ -569,6 +569,12 @@ const runWorldLoop = async (): Promise<void> => {
           ...(orchestratorSessionId ? { resume: orchestratorSessionId } : {}),
         } as Parameters<typeof query>[0]['options'];
 
+        const ORCHESTRATOR_TURN_TIMEOUT_MS = 120_000;
+        const timeout = setTimeout(() => {
+          abortCtrl.abort();
+          console.warn(`\n[Orchestrator] Assignment turn timed out after ${ORCHESTRATOR_TURN_TIMEOUT_MS / 1000}s; will retry next tick.`);
+        }, ORCHESTRATOR_TURN_TIMEOUT_MS);
+
         try {
           for await (const msg of query({ prompt, options: orchOptions })) {
             const m = msg as Record<string, unknown>;
@@ -602,6 +608,8 @@ const runWorldLoop = async (): Promise<void> => {
           if (!/abort/i.test(message)) {
             console.error(`\n[Orchestrator] Error: ${message}\n`);
           }
+        } finally {
+          clearTimeout(timeout);
         }
       } finally {
         orchestratorBusy = false;

@@ -308,6 +308,7 @@ Host path                                    Container path                     
 ────────────────────────────────────────────────────────────────────────────────────────
 world/memory/world.json                  →   /workspace/world/memory/world.json      :ro
 world/tasks/{taskId}/                    →   /workspace/world/tasks/{taskId}/         :rw
+world/tasks/{taskId}/claude-home/         →   /home/sandbox/.claude/                   :rw
 world/beings/{assignedId}/  (×N beings)  →   /workspace/world/beings/{assignedId}/   :rw
 world/shared/                            →   /workspace/world/shared/                 :ro
 output/                                  →   /workspace/output/                       :rw
@@ -321,6 +322,7 @@ AGENTS.md                                →   /workspace/AGENTS.md             
 | Action | Allowed? | Reason |
 |--------|----------|--------|
 | Write progress.json for its task | ✅ | `/workspace/world/tasks/{taskId}/` is rw |
+| Persist Claude conversation history | ✅ | `world/tasks/{taskId}/claude-home/` → `/home/sandbox/.claude/` :rw; conversation JSONL in `claude-home/projects/` |
 | Read dayCount from world.json | ✅ | `/workspace/world/memory/world.json` is ro |
 | Update its own beings' profile.json | ✅ | `/workspace/world/beings/{id}/` is rw |
 | Call tools / MCP servers | ✅ | World-shared tools injected at startup via `--mcp-config` |
@@ -336,6 +338,11 @@ once in `entrypoint.mjs` (`setupMcpConfig()`) and applied to every `claude` invo
 via `--mcp-config`. Authorization tokens reuse existing env vars — no extra secrets.
 
 To add a new MCP server or tool: add an entry to `src/sandbox/mcp-servers.mjs` (hardcoded world defaults) or use `npm run setup` in a separate terminal for the conversational setup assistant (persisted to `world/shared/mcp-servers.json`) — no other files need to change.
+
+Runtime MCP config generation normalizes legacy server records automatically:
+- `transport: streamableHttp/http/sse/stdio` is converted to Claude CLI schema `type: http/sse/stdio`.
+- `transport` field is removed in generated `/tmp/vibeguild-mcp.json`.
+- Existing `world/shared/mcp-servers.json` entries remain backward compatible.
 
 ### Sync mechanism (real-time)
 
@@ -368,6 +375,21 @@ This is achieved through continuous progress reporting from the sandbox to the w
 
 *chokidar: a Node.js file-watching library backed by OS-native filesystem events
 (ReadDirectoryChangesW on Windows, inotify on Linux). Near-zero latency, no polling loop.
+
+Completion gating semantics:
+- Task completion is validated from synced `progress.json` status, not from container exit code alone.
+- Auto-generated sandbox checkpoints (start/finish) do not count as meaningful execution evidence.
+- If a sandbox exits without meaningful progress evidence, the run is marked `failed` (prevents false-complete tasks).
+- Operator status tooling (`vg progress`) reads checkpoint fields compatibly (`at/description` and legacy variants).
+
+Runtime logging and repo details:
+- Every task persists sandbox runtime logs under `world/tasks/{taskId}/logs/` (e.g., `claude-code.log`, `runtime.log`, `progress-events.ndjson`, `docker.log`).
+- If `claude` exits `0` with empty stdout/stderr while `--mcp-config` is enabled, sandbox treats it as an MCP/provider compatibility silent-exit and retries once without `--mcp-config` (still Claude CLI, not raw API).
+- Alignment resume sessions (`waiting_for_human` -> re-launch) now have a hard timeout guard; on timeout/error with MCP enabled, sandbox retries once without MCP before failing the task explicitly.
+- In Docker mode, task repo resolution/creation is owned by sandbox entrypoint (not host orchestrator).
+- Naming: `task-<normalized-task-title>-<taskId8>`; reuse exact match first, then latest prefix match, else create new.
+- Missing token or repo-resolution/create failure marks the task as `failed`.
+- Task leaders are instructed to maintain a repo-side details folder `runtime-details/{taskId}/` and sync it repeatedly during execution.
 
 **When to intervene:** if a checkpoint looks wrong, stalls, or the summary reveals a
 misunderstanding, the creator can immediately inject a correction — before the being
@@ -499,10 +521,19 @@ Technical flow — leader-initiated (`waiting_for_human`):
 4. Operator types reply → message written to inbox → entrypoint re-launches Claude with
    full conversation history (`alignHistory[]` array). **No `in-progress` is written first** —
    that would immediately exit alignment mode on the host.
-5. Claude MUST write `waiting_for_human` to acknowledge the operator's message and confirm
+5. Re-launch sessions use a hard timeout guard (5 minutes per resume run) to prevent
+   indefinite hangs during alignment.
+6. If the resume run times out or errors with MCP enabled, sandbox retries once without MCP.
+   If the fallback also fails, task status is set to `failed` explicitly (no infinite wait state).
+7. Claude MUST write `waiting_for_human` to acknowledge the operator's message and confirm
    its updated plan before resuming. Host prints `💬 [leader] <acknowledgment>`.
-6. Operator confirms ("可以" / "proceed") → Claude writes `in-progress` → loop exits.
-7. Safety cap: 20 rounds maximum before auto-fail.
+8. Operator confirms ("可以" / "proceed") → Claude writes `in-progress` → loop exits.
+9. Safety cap: 20 rounds maximum before auto-fail.
+
+Verification snapshot (2026-02-24):
+- Post-patch acceptance task `db240f61-63c5-4494-91af-eb56956e4baa` completed successfully.
+- Output artifact `output/geo-acceptance-mcp-patched.txt` was generated with citation URLs.
+- Runtime logs show clean Claude exit (`code=0`) and container completion.
 
 ### World Setup Assistant
 
@@ -518,6 +549,8 @@ Capabilities:
 - List, add, remove MCP servers (persisted to `world/shared/mcp-servers.json`)
 - **Test** whether an MCP endpoint actually responds before committing it
 - Add, remove shared skill files (`world/shared/skills/`)
+
+Use `/task`, `/pause --task`, `/done` only in the `npm start` world terminal; do not use them in the setup terminal.
 
 MCP changes take effect for **new** sandbox tasks; running containers are unaffected.
 

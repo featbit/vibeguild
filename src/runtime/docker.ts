@@ -19,13 +19,12 @@
  */
 
 import { spawn, exec as execCb } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, appendFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { watch } from 'chokidar';
 import { writeTaskInbox, readProgressSync } from './sync.js';
-import { createTaskRepo } from '../github/repo.js';
-import { updateTaskStatus } from '../tasks/queue.js';
+import { updateTaskStatus, updateTaskSandbox } from '../tasks/queue.js';
 import { loadRuntimeConfig, worldPath } from './config.js';
 import type { Task } from '../tasks/types.js';
 import type { AdapterOptions, AdapterState, RuntimeAdapter } from './adapter.js';
@@ -70,17 +69,51 @@ export const createDockerSandboxAdapter = (
 ): RuntimeAdapter => {
   const cfg = loadRuntimeConfig();
   const wPath = worldPath(cfg);
+  const taskDir = join(wPath, 'tasks', taskId);
+  const logsDir = join(taskDir, 'logs');
 
-  // Mutable state in an object so TypeScript can't narrow it across async closures.
-  // TypeScript narrows closed-over `let` variables but NOT property accesses.
   const ctx = {
     state: 'idle' as AdapterState,
     containerId: null as string | null,
-    sandboxRepoUrl: null as string | null,
     progressWatcher: null as ReturnType<typeof watch> | null,
   };
 
   const pendingMessages: string[] = [];
+
+  const appendTaskLog = async (file: string, line: string): Promise<void> => {
+    await mkdir(logsDir, { recursive: true });
+    await appendFile(join(logsDir, file), `${line}\n`, 'utf-8');
+  };
+
+  const logRuntime = async (message: string): Promise<void> => {
+    const ts = new Date().toISOString();
+    await appendTaskLog('runtime.log', `[${ts}] ${message}`);
+  };
+
+  const logProgressEvent = async (progress: unknown): Promise<void> => {
+    const event = {
+      at: new Date().toISOString(),
+      taskId,
+      progress,
+    };
+    await appendTaskLog('progress-events.ndjson', JSON.stringify(event));
+  };
+
+  const captureDockerLogs = async (): Promise<void> => {
+    if (!ctx.containerId) return;
+    try {
+      const { stdout: logs, stderr: logsErr } = await execAsync(`docker logs ${ctx.containerId}`);
+      const allLogs = [logs.trim(), logsErr ? `[stderr]\n${logsErr.trim()}` : '']
+        .filter(Boolean)
+        .join('\n');
+      if (allLogs) {
+        await appendTaskLog('docker.log', allLogs);
+        console.error(`\n📋 [Sandbox:${taskId.slice(0, 8)}] Container logs:\n${allLogs}`);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   const stopWatcher = () => {
     ctx.progressWatcher?.close().catch(() => undefined);
@@ -88,19 +121,25 @@ export const createDockerSandboxAdapter = (
   };
 
   const startProgressWatch = () => {
-    const progressFile = join(wPath, 'tasks', taskId, 'progress.json');
+    const progressFile = join(taskDir, 'progress.json');
     ctx.progressWatcher = watch(progressFile, {
       ignoreInitial: false,
       awaitWriteFinish: { stabilityThreshold: 200 },
     });
-    ctx.progressWatcher.on('change', () => {
-      void readProgressSync(wPath, taskId).then((p) => {
-        if (p) opts.onProgress?.(p);
-      });
-    });
-  };
 
-  // ─── adapter ───────────────────────────────────────────────────────────────
+    const onProgressFile = () => {
+      void readProgressSync(wPath, taskId).then(async (p) => {
+        if (p?.sandboxRepoUrl) {
+          await updateTaskSandbox(taskId, { repoUrl: p.sandboxRepoUrl }).catch(() => undefined);
+        }
+        if (p) opts.onProgress?.(p);
+        if (p) await logProgressEvent(p).catch(() => undefined);
+      });
+    };
+
+    ctx.progressWatcher.on('add', onProgressFile);
+    ctx.progressWatcher.on('change', onProgressFile);
+  };
 
   return {
     taskId,
@@ -108,63 +147,37 @@ export const createDockerSandboxAdapter = (
 
     start: async (task: Task) => {
       ctx.state = 'running';
+      const taskDetailsDir = `runtime-details/${task.id}`;
 
-      // Create a GitHub repo for this task's execution artifacts (best-effort)
-      if (cfg.githubToken) {
-        try {
-          const repo = await createTaskRepo({
-            taskId,
-            taskTitle: task.title,
-            org: cfg.githubOrg,
-            token: cfg.githubToken,
-          });
-          ctx.sandboxRepoUrl = repo.url;
-          console.log(`\n🔧 [Sandbox:${taskId.slice(0, 8)}] GitHub repo: ${repo.url}`);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`\n⚠️  [Sandbox:${taskId.slice(0, 8)}] GitHub repo creation skipped: ${msg}`);
-        }
-      }
+      const claudeHomeDir = join(taskDir, 'claude-home');
 
-      // Build docker run args
-      const containerName = `vibeguild-${taskId.slice(0, 8)}`;
-
-      // ── Precise volume mounts (isolation boundary) ───────────────────────
-      // Pre-create host-side directories so Docker doesn't create them as root-owned.
-      const taskDir    = join(wPath, 'tasks', taskId);
-      const beingsRoot = join(wPath, 'beings');
-      const sharedDir  = join(wPath, 'shared');
-      const assignedBeings = task.assignedTo ?? [leaderId];
       await mkdir(taskDir, { recursive: true });
+      await mkdir(logsDir, { recursive: true });
+      await mkdir(claudeHomeDir, { recursive: true });
+      await logRuntime(`Task runner starting (leader=${leaderId}, mode=docker)`);
+
+      const containerName = `vibeguild-${taskId.slice(0, 8)}`;
+      const beingsRoot = join(wPath, 'beings');
+      const sharedDir = join(wPath, 'shared');
+      const assignedBeings = task.assignedTo ?? [leaderId];
+
       await mkdir(sharedDir, { recursive: true });
       await Promise.all(assignedBeings.map((id) => mkdir(join(beingsRoot, id), { recursive: true })));
 
-      // Per-being mounts: only the assigned beings' directories are writable.
-      // Every other being's data is invisible to this container.
       const beingMounts = assignedBeings.flatMap((id) => [
         '-v', `${beingsRoot}/${id}:/workspace/world/beings/${id}`,
       ]);
 
       const dockerArgs = [
-        // No --rm: we keep the container on failure so we can capture logs
         '--name', containerName,
-        // ── Read-only context ────────────────────────────────────────────
-        // World-level metadata (dayCount, worldStatus — never written by sandbox)
         '-v', `${wPath}/memory/world.json:/workspace/world/memory/world.json:ro`,
-        // World rules and being identity (AGENTS.md)
         '-v', `${join(cfg.workspaceRoot, 'AGENTS.md')}:/workspace/AGENTS.md:ro`,
-        // Sandbox entrypoint script
         '-v', `${join(cfg.workspaceRoot, 'src', 'sandbox', 'entrypoint.mjs')}:/workspace/src/sandbox/entrypoint.mjs:ro`,
-        // World-shared MCP / tool definitions (add new servers to this file)
         '-v', `${join(cfg.workspaceRoot, 'src', 'sandbox', 'mcp-servers.mjs')}:/workspace/src/sandbox/mcp-servers.mjs:ro`,
-        // World-shared skills and dynamic MCP registry (operator-added at runtime)
         '-v', `${join(wPath, 'shared')}:/workspace/world/shared:ro`,
-        // ── Read-write: this task only ──────────────────────────────────
-        // progress.json and inbox.json for this specific task
         '-v', `${taskDir}:/workspace/world/tasks/${taskId}`,
-        // ── Read-write: assigned beings only ────────────────────────────
+        '-v', `${claudeHomeDir}:/home/sandbox/.claude`,
         ...beingMounts,
-        // ── Read-write: shared output directory (deliverables) ──────────
         '-v', `${join(cfg.workspaceRoot, 'output')}:/workspace/output`,
         '-w', '/workspace',
         '-e', `TASK_ID=${task.id}`,
@@ -178,57 +191,69 @@ export const createDockerSandboxAdapter = (
         '-e', `EXECUTION_MODE=${cfg.executionMode}`,
         '-e', `VIBEGUILD_GITHUB_TOKEN=${cfg.githubToken}`,
         '-e', `VIBEGUILD_GITHUB_ORG=${cfg.githubOrg}`,
-        ...(ctx.sandboxRepoUrl ? ['-e', `SANDBOX_REPO_URL=${ctx.sandboxRepoUrl}`] : []),
+        '-e', `HOME=/home/sandbox`,
+        '-e', `TASK_DETAIL_DIR=${taskDetailsDir}`,
         cfg.dockerImage,
         'node', '/workspace/src/sandbox/entrypoint.mjs',
       ];
 
       await updateTaskStatus(taskId, 'in-progress', task.assignedTo);
-
-      // Remove any leftover container with the same name (e.g. from a previous crashed run).
       await execAsync(`docker rm -f ${containerName}`).catch(() => undefined);
 
       ctx.containerId = await dockerRunDetached(dockerArgs);
+      await updateTaskSandbox(taskId, { containerId: ctx.containerId });
+      await logRuntime(`Container started: ${ctx.containerId}`);
       console.log(`\n🐳 [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} started.`);
 
       startProgressWatch();
 
-      // Wait for the container to finish in the background.
-      // Reading ctx.state (property access) — TypeScript cannot narrow property
-      // accesses the way it narrows let-variables, so these comparisons are safe.
       void (async () => {
         try {
           const exitCode = await waitForContainer(ctx.containerId!);
           stopWatcher();
-          if (ctx.state === 'paused') {
-            // Container was stopped by release() while paused — not an error
+
+          if (ctx.state === 'paused') return;
+
+          if (exitCode === 0) {
+            const progress = await readProgressSync(wPath, taskId);
+            const progressStatus = progress?.status;
+
+            if (progressStatus === 'completed') {
+              ctx.state = 'completed';
+              await updateTaskStatus(taskId, 'completed');
+              await logRuntime('Container finished successfully and progress status is completed.');
+              console.log(`\n✅ [Sandbox:${taskId.slice(0, 8)}] Container finished successfully.`);
+              await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
+              opts.onComplete?.(taskId);
+              return;
+            }
+
+            ctx.state = 'failed';
+            await updateTaskStatus(taskId, 'failed');
+            const reason = progress
+              ? `Container exited with code 0 but progress status is "${progressStatus ?? 'unknown'}".`
+              : 'Container exited with code 0 but no progress.json was found.';
+            await logRuntime(`FAILED: ${reason}`);
+            console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${reason}`);
+            await captureDockerLogs();
+            await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
+            opts.onError?.(taskId, new Error(reason));
             return;
           }
-          if (exitCode === 0) {
-            ctx.state = 'completed';
-            await updateTaskStatus(taskId, 'completed');
-            console.log(`\n✅ [Sandbox:${taskId.slice(0, 8)}] Container finished successfully.`);
-            await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
-            opts.onComplete?.(taskId);
-          } else {
-            // Capture logs (stdout + stderr) before removing the container
-            try {
-              const { stdout: logs, stderr: logsErr } = await execAsync(`docker logs ${ctx.containerId}`);
-              const allLogs = [logs.trim(), logsErr ? `[stderr]\n${logsErr.trim()}` : '']
-                .filter(Boolean).join('\n');
-              if (allLogs) {
-                console.error(`\n📋 [Sandbox:${taskId.slice(0, 8)}] Container logs:\n${allLogs}`);
-              }
-            } catch { /* ignore */ }
-            await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
-            ctx.state = 'failed';
-            const err = new Error(`Sandbox container exited with code ${exitCode}`);
-            console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${err.message}`);
-            opts.onError?.(taskId, err);
-          }
+
+          await captureDockerLogs();
+          await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
+          ctx.state = 'failed';
+          await updateTaskStatus(taskId, 'failed');
+          const err = new Error(`Sandbox container exited with code ${exitCode}`);
+          await logRuntime(`FAILED: ${err.message}`);
+          console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${err.message}`);
+          opts.onError?.(taskId, err);
         } catch (err) {
           if (ctx.state !== 'paused') {
             ctx.state = 'failed';
+            await updateTaskStatus(taskId, 'failed').catch(() => undefined);
+            await logRuntime(`FAILED: ${err instanceof Error ? err.message : String(err)}`).catch(() => undefined);
             opts.onError?.(taskId, err instanceof Error ? err : new Error(String(err)));
           }
         }
@@ -239,6 +264,7 @@ export const createDockerSandboxAdapter = (
       if (ctx.containerId && ctx.state === 'running') {
         await execAsync(`docker pause ${ctx.containerId}`);
         ctx.state = 'paused';
+        await logRuntime(`Container paused: ${ctx.containerId}`);
         console.log(`\n⏸  [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} paused.`);
       }
     },
@@ -247,6 +273,7 @@ export const createDockerSandboxAdapter = (
       if (ctx.containerId && ctx.state === 'paused') {
         await execAsync(`docker unpause ${ctx.containerId}`);
         ctx.state = 'running';
+        await logRuntime(`Container resumed: ${ctx.containerId}`);
         console.log(`\n▶️  [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} resumed.`);
       }
     },
@@ -254,6 +281,7 @@ export const createDockerSandboxAdapter = (
     injectMessage: async (msg: string) => {
       pendingMessages.push(msg);
       await writeTaskInbox(wPath, taskId, [...pendingMessages]);
+      await logRuntime(`Operator message injected (${msg.length} chars).`);
       console.log(`\n💬 [Sandbox:${taskId.slice(0, 8)}] Message written to inbox.json.`);
     },
 
@@ -262,6 +290,7 @@ export const createDockerSandboxAdapter = (
       if (ctx.containerId) {
         try {
           await execAsync(`docker stop ${ctx.containerId}`);
+          await logRuntime(`Container stopped during release: ${ctx.containerId}`);
         } catch {
           // Container may have already exited — ignore
         }

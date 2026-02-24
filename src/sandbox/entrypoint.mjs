@@ -13,14 +13,13 @@
  *   LEADER_ID            — being ID leading this task
  *   ASSIGNED_TO          — comma-separated list of all beings
  *   ANTHROPIC_API_KEY    — required for claude CLI
- *   VIBEGUILD_GITHUB_TOKEN  — optional; enables git push to sandbox repo
- *   SANDBOX_REPO_URL     — optional; GitHub repo URL for this task
+ *   VIBEGUILD_GITHUB_TOKEN  — required in docker mode; task repo creation/push
  *
  * The workspace is mounted at /workspace; world/ lives at /workspace/world/.
  */
 
 import { spawn } from 'node:child_process';
-import { writeFile, readFile, mkdir, unlink } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, unlink, appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getMcpServers } from './mcp-servers.mjs';
 
@@ -29,12 +28,133 @@ const TASK_TITLE = decodeURIComponent(process.env['TASK_TITLE'] ?? 'Untitled tas
 const TASK_DESCRIPTION = decodeURIComponent(process.env['TASK_DESCRIPTION'] ?? '');
 const LEADER_ID = process.env['LEADER_ID'] ?? 'leader';
 const ASSIGNED_TO = (process.env['ASSIGNED_TO'] ?? LEADER_ID).split(',').map(s => s.trim()).filter(Boolean);
-const SANDBOX_REPO_URL = process.env['SANDBOX_REPO_URL'] ?? '';
+const GITHUB_TOKEN = process.env['VIBEGUILD_GITHUB_TOKEN'] ?? '';
+const GITHUB_OWNER = process.env['VIBEGUILD_GITHUB_ORG'] ?? 'vibeguild';
+let SANDBOX_REPO_URL = '';
+const TASK_DETAIL_DIR = process.env['TASK_DETAIL_DIR'] ?? `runtime-details/${TASK_ID}`;
 
 const WORKSPACE = '/workspace';
 const WORLD_ROOT = join(WORKSPACE, 'world');
 const TASK_DIR = join(WORLD_ROOT, 'tasks', TASK_ID);
 const PAUSE_SIGNAL_PATH = join(TASK_DIR, 'pause.signal');
+const PROGRESS_PATH = join(TASK_DIR, 'progress.json');
+const LOGS_DIR = join(TASK_DIR, 'logs');
+const CLAUDE_LOG_PATH = join(LOGS_DIR, 'claude-code.log');
+
+const appendClaudeLog = async (stream, text) => {
+  const ts = new Date().toISOString();
+  await mkdir(LOGS_DIR, { recursive: true });
+  await appendFile(CLAUDE_LOG_PATH, `[${ts}] [${stream}] ${text}\n`, 'utf-8');
+};
+
+const repoSlug = (text) =>
+  String(text ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40) || 'task';
+
+const taskRepoPrefix = () => `task-${repoSlug(TASK_TITLE)}`;
+const exactTaskRepoName = () => `${taskRepoPrefix()}-${TASK_ID.slice(0, 8)}`;
+
+const ghFetch = async (url, init = {}) => {
+  if (!GITHUB_TOKEN) throw new Error('VIBEGUILD_GITHUB_TOKEN is missing in sandbox env.');
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(init.headers ?? {}),
+    },
+  });
+  return res;
+};
+
+const getRepoIfExists = async (owner, repo) => {
+  const res = await ghFetch(`https://api.github.com/repos/${owner}/${repo}`);
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GitHub read repo failed: ${res.status} — ${body}`);
+  }
+  return res.json();
+};
+
+const listCandidateRepos = async (owner, prefix) => {
+  const res = await ghFetch(`https://api.github.com/orgs/${owner}/repos?type=private&per_page=100&sort=updated`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GitHub list repos failed: ${res.status} — ${body}`);
+  }
+  const repos = await res.json();
+  return Array.isArray(repos) ? repos.filter((r) => String(r?.name ?? '').startsWith(prefix)) : [];
+};
+
+const createRepo = async (ownerOrNull, name) => {
+  const body = {
+    name,
+    description: `Vibe Guild execution sandbox for task ${TASK_ID}: ${TASK_TITLE}`,
+    private: true,
+    auto_init: true,
+  };
+  const url = ownerOrNull
+    ? `https://api.github.com/orgs/${ownerOrNull}/repos`
+    : 'https://api.github.com/user/repos';
+  const res = await ghFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`GitHub create repo failed: ${res.status} — ${txt}`);
+  }
+  return res.json();
+};
+
+const resolveSandboxRepo = async () => {
+  const exactName = exactTaskRepoName();
+  const prefix = taskRepoPrefix();
+  await appendClaudeLog('system', `Resolving task repo by exact name ${exactName} or prefix ${prefix}-*`);
+
+  const exact = await getRepoIfExists(GITHUB_OWNER, exactName).catch(() => null);
+  if (exact?.html_url) {
+    SANDBOX_REPO_URL = exact.html_url;
+    await appendClaudeLog('system', `Resolved existing exact repo: ${SANDBOX_REPO_URL}`);
+    return SANDBOX_REPO_URL;
+  }
+
+  try {
+    const candidates = await listCandidateRepos(GITHUB_OWNER, prefix);
+    if (candidates.length > 0) {
+      SANDBOX_REPO_URL = String(candidates[0].html_url ?? '');
+      if (SANDBOX_REPO_URL) {
+        await appendClaudeLog('system', `Reusing latest repo by prefix: ${SANDBOX_REPO_URL}`);
+        return SANDBOX_REPO_URL;
+      }
+    }
+  } catch (err) {
+    await appendClaudeLog('system', `Org repo listing failed (${GITHUB_OWNER}): ${err?.message ?? err}`);
+  }
+
+  try {
+    const created = await createRepo(GITHUB_OWNER, exactName);
+    SANDBOX_REPO_URL = String(created?.html_url ?? '');
+    if (SANDBOX_REPO_URL) {
+      await appendClaudeLog('system', `Created org repo: ${SANDBOX_REPO_URL}`);
+      return SANDBOX_REPO_URL;
+    }
+  } catch (err) {
+    await appendClaudeLog('system', `Org repo create failed (${GITHUB_OWNER}): ${err?.message ?? err}`);
+  }
+
+  const createdUser = await createRepo(null, exactName);
+  SANDBOX_REPO_URL = String(createdUser?.html_url ?? '');
+  if (!SANDBOX_REPO_URL) throw new Error('GitHub repo creation succeeded but html_url is empty.');
+  await appendClaudeLog('system', `Created user repo fallback: ${SANDBOX_REPO_URL}`);
+  return SANDBOX_REPO_URL;
+};
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -75,27 +195,52 @@ const safeReadJson = async (p) => {
 const writeProgress = async (status, summary, percent, extra = {}) => {
   const worldJson = await safeReadJson(join(WORLD_ROOT, 'memory', 'world.json'));
   const worldDay = worldJson?.dayCount ?? 0;
+  const current = await safeReadJson(PROGRESS_PATH);
+  const baseCheckpoints = Array.isArray(current?.checkpoints) ? current.checkpoints : [];
+  const checkpointDescription = typeof extra?.checkpointDescription === 'string'
+    ? extra.checkpointDescription
+    : null;
+  const checkpoints = checkpointDescription
+    ? [...baseCheckpoints, { at: new Date().toISOString(), description: checkpointDescription }]
+    : baseCheckpoints;
+  const { checkpointDescription: _checkpointDescription, ...extraFields } = extra;
+
+  /** @type {Record<string, unknown>} */
+  const payload = {
+    ...(current && typeof current === 'object' ? current : {}),
+    taskId: TASK_ID,
+    leaderId: LEADER_ID,
+    worldDay,
+    reportedAt: new Date().toISOString(),
+    status,
+    summary,
+    percentComplete: percent,
+    checkpoints,
+    ...(SANDBOX_REPO_URL ? { sandboxRepoUrl: SANDBOX_REPO_URL } : {}),
+    ...extraFields,
+  };
+
+  if (status !== 'waiting_for_human' && 'question' in payload) {
+    delete payload.question;
+  }
+
   await mkdir(TASK_DIR, { recursive: true });
-  await writeFile(
-    join(TASK_DIR, 'progress.json'),
-    JSON.stringify(
-      {
-        taskId: TASK_ID,
-        leaderId: LEADER_ID,
-        worldDay,
-        reportedAt: new Date().toISOString(),
-        status,
-        summary,
-        percentComplete: percent,
-        checkpoints: [],
-        ...(SANDBOX_REPO_URL ? { sandboxRepoUrl: SANDBOX_REPO_URL } : {}),
-        ...extra,
-      },
-      null,
-      2,
-    ),
-    'utf-8',
-  );
+  await writeFile(PROGRESS_PATH, JSON.stringify(payload, null, 2), 'utf-8');
+};
+
+const hasExecutionEvidence = (progress) => {
+  if (!progress || typeof progress !== 'object') return false;
+  const checkpoints = Array.isArray(progress.checkpoints) ? progress.checkpoints : [];
+  const meaningfulCheckpoints = checkpoints.filter((cp) => {
+    const text = String(cp?.description ?? '');
+    return text.length > 0 && !/sandbox agent starting|sandbox run started|sandbox run finished|paused by creator|auto-validation/i.test(text);
+  });
+  if (meaningfulCheckpoints.length > 0) return true;
+
+  const summary = String(progress.summary ?? '').trim();
+  const isDefaultSummary = summary === 'Sandbox agent starting…' || summary === 'Sandbox agent finished execution.';
+  const percent = Number(progress.percentComplete ?? 0);
+  return summary.length > 0 && !isDefaultSummary && percent >= 10;
 };
 
 /** @returns {Promise<string[]>} */
@@ -202,6 +347,13 @@ const buildPrompt = () => {
       ``,
       `**Execution repo:** ${SANDBOX_REPO_URL}`,
       `Push important artifacts, code, and notes there via git.`,
+      `Create and continuously update a details folder in that repo: ${TASK_DETAIL_DIR}/`,
+      `Required files in ${TASK_DETAIL_DIR}/:`,
+      `  - claude-code.log (raw runtime log excerpts)`,
+      `  - progress-snapshots.ndjson (append each milestone snapshot)`,
+      `  - artifacts-manifest.md (what was produced and where)`,
+      `Sync this folder to GitHub repeatedly during execution, not only at the end.`,
+      `Also mirror logs from world/tasks/${TASK_ID}/logs/ when relevant.`,
     );
   }
 
@@ -263,7 +415,25 @@ const setupMcpConfig = async () => {
     // File doesn't exist or isn't valid JSON — use only hardcoded servers
   }
 
-  const mcpServers = { ...hardcoded, ...dynamic };
+  const merged = { ...hardcoded, ...dynamic };
+  const mcpServers = Object.fromEntries(
+    Object.entries(merged).map(([name, raw]) => {
+      const cfg = raw && typeof raw === 'object' ? { ...raw } : {};
+
+      if (!cfg.type && typeof cfg.transport === 'string') {
+        const transport = String(cfg.transport).toLowerCase();
+        if (transport === 'http' || transport === 'streamablehttp') cfg.type = 'http';
+        else if (transport === 'sse') cfg.type = 'sse';
+        else if (transport === 'stdio') cfg.type = 'stdio';
+      }
+
+      if (!cfg.type && typeof cfg.command === 'string') cfg.type = 'stdio';
+      if (!cfg.type && typeof cfg.url === 'string') cfg.type = 'http';
+
+      if ('transport' in cfg) delete cfg.transport;
+      return [name, cfg];
+    }),
+  );
   const config = { mcpServers };
   const configPath = '/tmp/vibeguild-mcp.json';
   await writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
@@ -282,13 +452,16 @@ const setupMcpConfig = async () => {
  *
  * @param {string} prompt
  * @param {string|null} [mcpConfigPath]
+ * @param {boolean} [allowMcpSilentFallback]
+ * @param {number} [timeoutMs]
  * @returns {Promise<'done' | 'paused'>}
  */
-const runClaudeInterruptible = async (prompt, mcpConfigPath = null) => {
+const runClaudeInterruptible = async (prompt, mcpConfigPath = null, allowMcpSilentFallback = true, timeoutMs = 0) => {
   const modelArgs = process.env['ANTHROPIC_MODEL']
     ? ['--model', process.env['ANTHROPIC_MODEL']]
     : [];
   const mcpArgs = mcpConfigPath ? ['--mcp-config', mcpConfigPath] : [];
+  await appendClaudeLog('system', `Launching Claude with model=${process.env['ANTHROPIC_MODEL'] ?? 'default'} mcpConfig=${mcpConfigPath ?? 'none'}`);
   const proc = spawn(
     'claude',
     ['--dangerously-skip-permissions', ...modelArgs, ...mcpArgs, '-p', prompt],
@@ -300,24 +473,86 @@ const runClaudeInterruptible = async (prompt, mcpConfigPath = null) => {
   );
 
   proc.stdout?.on('data', (/** @type {Buffer} */ d) => {
-    process.stdout.write(`[${LEADER_ID}] ${d.toString()}`);
+    const text = d.toString();
+    process.stdout.write(`[${LEADER_ID}] ${text}`);
+    void appendClaudeLog('stdout', text.trimEnd()).catch(() => undefined);
   });
   proc.stderr?.on('data', (/** @type {Buffer} */ d) => {
-    process.stderr.write(`[${LEADER_ID}:err] ${d.toString()}`);
+    const text = d.toString();
+    process.stderr.write(`[${LEADER_ID}:err] ${text}`);
+    void appendClaudeLog('stderr', text.trimEnd()).catch(() => undefined);
   });
 
-  let killed = false;
+  let pauseKilled = false;
+  let timeoutKilled = false;
   let done = false;
+  let sawStdout = false;
+  let sawStderr = false;
+  const hardTimeoutMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : 0;
+  let timeoutHandle = null;
+
+  proc.stdout?.on('data', (/** @type {Buffer} */ d) => {
+    if (d.toString().trim().length > 0) sawStdout = true;
+  });
+
+  proc.stderr?.on('data', (/** @type {Buffer} */ d) => {
+    if (d.toString().trim().length > 0) sawStderr = true;
+  });
 
   /** @type {Promise<'done' | 'paused'>} */
   const claudeFinished = new Promise((resolve, reject) => {
-    proc.on('close', (code) => {
+    proc.on('close', async (code) => {
       done = true;
-      if (killed) resolve('paused');
-      else if (code === 0) resolve('done');
-      else reject(new Error(`claude exited with code ${code}`));
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      void appendClaudeLog('system', `Claude process exited code=${code} killedByPause=${pauseKilled} killedByTimeout=${timeoutKilled}`).catch(() => undefined);
+      if (pauseKilled) {
+        resolve('paused');
+        return;
+      }
+
+      if (timeoutKilled) {
+        reject(new Error(`claude timed out after ${hardTimeoutMs}ms`));
+        return;
+      }
+
+      if (code === 0) {
+        const mcpSilentExit = mcpConfigPath && allowMcpSilentFallback && !sawStdout && !sawStderr;
+        if (mcpSilentExit) {
+          const progress = await safeReadJson(PROGRESS_PATH);
+          const hasEvidence = hasExecutionEvidence(progress);
+          const status = String(progress?.status ?? '');
+          const shouldRetryWithoutMcp = !hasEvidence && status !== 'completed' && status !== 'waiting_for_human';
+
+          if (shouldRetryWithoutMcp) {
+            const warning = 'Claude exited 0 with no stdout/stderr while MCP was enabled; retrying once without --mcp-config.';
+            console.warn(`[sandbox] ${warning}`);
+            await appendClaudeLog('system', warning);
+            runClaudeInterruptible(prompt, null, false).then(resolve).catch(reject);
+            return;
+          }
+        }
+
+        resolve('done');
+        return;
+      }
+
+      reject(new Error(`claude exited with code ${code}`));
     });
   });
+
+  if (hardTimeoutMs > 0) {
+    timeoutHandle = setTimeout(async () => {
+      if (done) return;
+      timeoutKilled = true;
+      const timeoutMsg = `Claude hard timeout reached (${hardTimeoutMs}ms); sending SIGTERM.`;
+      console.error(`[sandbox] ${timeoutMsg}`);
+      await appendClaudeLog('system', timeoutMsg).catch(() => undefined);
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        if (!done) proc.kill('SIGKILL');
+      }, 5000);
+    }, hardTimeoutMs);
+  }
 
   // Concurrent poller: checks for pause.signal every 2 s while Claude runs.
   // Fire-and-forget — resolves only by side-effect (killing proc).
@@ -328,7 +563,8 @@ const runClaudeInterruptible = async (prompt, mcpConfigPath = null) => {
       const sig = await readAndClearPauseSignal();
       if (sig) {
         console.log(`[sandbox] ⏸ Pause signal received ("${sig.message ?? ''}"). Stopping Claude…`);
-        killed = true;
+        await appendClaudeLog('system', `Pause signal received: ${sig.message ?? ''}`);
+        pauseKilled = true;
         proc.kill('SIGTERM');
         break;
       }
@@ -409,6 +645,8 @@ const EXECUTION_MODE = process.env['EXECUTION_MODE'] ?? 'v1';
  * asks a follow-up or resumes. Set high so natural conversations are not cut off.
  */
 const MAX_ALIGNMENT_ROUNDS = 20;
+const MAX_NOOP_RETRY = 1;
+const ALIGNMENT_RESUME_TIMEOUT_MS = 5 * 60 * 1000;
 
 const run = async () => {
   if (!TASK_ID) {
@@ -416,8 +654,28 @@ const run = async () => {
     process.exit(1);
   }
 
+  if (!GITHUB_TOKEN) {
+    const reason = 'VIBEGUILD_GITHUB_TOKEN is required in sandbox for task repo resolution.';
+    await writeProgress('failed', reason, 0, { checkpointDescription: 'Sandbox startup failed: missing GitHub token' });
+    await appendClaudeLog('system', reason);
+    console.error(`[sandbox] ${reason}`);
+    process.exit(1);
+  }
+
   console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE} (mode: ${EXECUTION_MODE})`);
-  await writeProgress('in-progress', 'Sandbox agent starting…', 0);
+  try {
+    await resolveSandboxRepo();
+  } catch (err) {
+    const reason = `Task repo resolution failed: ${err?.message ?? err}`;
+    await writeProgress('failed', reason, 0, { checkpointDescription: 'Sandbox startup failed: repo resolution failed' });
+    await appendClaudeLog('system', reason);
+    console.error(`[sandbox] ${reason}`);
+    process.exit(1);
+  }
+
+  await writeProgress('in-progress', 'Sandbox agent starting…', 0, {
+    checkpointDescription: 'Sandbox run started',
+  });
 
   // Set up world-shared MCP servers (web search, etc.) before launching claude
   const mcpConfigPath = await setupMcpConfig();
@@ -429,12 +687,12 @@ const run = async () => {
     ? `${basePrompt}\n\n--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
     : basePrompt;
 
-  // ── First run ────────────────────────────────────────────────────────────────────
-  const firstResult = await runClaudeInterruptible(firstPrompt, mcpConfigPath);
+  /** @type {'done' | 'paused'} */
+  let runResult = await runClaudeInterruptible(firstPrompt, mcpConfigPath);
 
   // If the host interrupted Claude via pause.signal, we own the waiting_for_human
   // state. Write it ourselves so the alignment loop below can pick it up.
-  if (firstResult === 'paused') {
+  if (runResult === 'paused') {
     const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
     const pauseMsgs = await drainInbox(); // grab the MEETUP msg for context (and clear it)
     const pauseContext = pauseMsgs.length > 0 ? pauseMsgs.join(' ') : 'Creator requested alignment via /pause --task';
@@ -485,7 +743,49 @@ const run = async () => {
     console.log(`[sandbox] Operator message received. Re-launching leader with full conversation.`);
     // Do NOT write in-progress here — that would immediately exit world.ts alignment mode.
     // Let Claude decide: write waiting_for_human (acknowledgment/follow-up) or in-progress (proceed).
-    const resumeResult = await runClaudeInterruptible(buildResumePrompt(answer, progress, alignHistory), mcpConfigPath);
+    const resumePrompt = buildResumePrompt(answer, progress, alignHistory);
+    let resumeResult;
+    try {
+      resumeResult = await runClaudeInterruptible(
+        resumePrompt,
+        mcpConfigPath,
+        true,
+        ALIGNMENT_RESUME_TIMEOUT_MS,
+      );
+    } catch (err) {
+      const firstErr = err instanceof Error ? err.message : String(err);
+      const warn = `Alignment resume with MCP failed (${firstErr}); retrying once without MCP.`;
+      console.error(`[sandbox] ${warn}`);
+      await appendClaudeLog('system', warn);
+      await writeProgress(
+        'waiting_for_human',
+        'Alignment resume stalled; auto-retrying once without MCP.',
+        progress.percentComplete ?? 0,
+        { question },
+      );
+
+      try {
+        resumeResult = await runClaudeInterruptible(
+          resumePrompt,
+          null,
+          false,
+          ALIGNMENT_RESUME_TIMEOUT_MS,
+        );
+      } catch (retryErr) {
+        const secondErr = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        const reason = `Alignment resume failed after MCP fallback: ${secondErr}`;
+        console.error(`[sandbox] ${reason}`);
+        await appendClaudeLog('system', reason);
+        await writeProgress(
+          'failed',
+          reason,
+          progress.percentComplete ?? 0,
+          { checkpointDescription: 'Alignment resume failed after MCP fallback' },
+        );
+        process.exit(1);
+      }
+    }
+
     // Handle mid-run pause during a resume session
     if (resumeResult === 'paused') {
       const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
@@ -502,10 +802,80 @@ const run = async () => {
 
   // ── Final progress sync ──────────────────────────────────────────────────
   // (leader may have already written completed — that's fine)
-  const current = await safeReadJson(join(TASK_DIR, 'progress.json'));
-  if (!current || current.status !== 'completed') {
-    await writeProgress('completed', 'Sandbox agent finished execution.', 100);
+  const current = await safeReadJson(PROGRESS_PATH);
+  if (!current) {
+    await writeProgress('failed', 'Sandbox exited without progress evidence.', 0, {
+      checkpointDescription: 'Auto-validation failed: progress.json missing',
+    });
+    console.error('[sandbox] Missing progress.json at end of run. Marking failed.');
+    process.exit(1);
   }
+
+  if (current.status === 'completed') {
+    console.log(`[sandbox] Task ${TASK_ID.slice(0, 8)} done.`);
+    return;
+  }
+
+  if (current.status === 'failed' || current.status === 'blocked') {
+    console.error(`[sandbox] Task ended with status=${current.status}.`);
+    process.exit(1);
+  }
+
+  if (current.status === 'waiting_for_human') {
+    await writeProgress('failed', 'Sandbox exited while still waiting for human response.', Number(current.percentComplete ?? 0), {
+      checkpointDescription: 'Auto-validation failed: still waiting_for_human at process end',
+    });
+    console.error('[sandbox] Still waiting_for_human at process end. Marking failed.');
+    process.exit(1);
+  }
+
+  if (!hasExecutionEvidence(current)) {
+    let recovered = false;
+    for (let attempt = 1; attempt <= MAX_NOOP_RETRY; attempt++) {
+      const remediationPrompt = [
+        EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt(),
+        '',
+        '--- REMEDIATION ---',
+        'Your previous run exited without meaningful progress evidence.',
+        'You MUST now perform at least one concrete task action and then update progress.json with a meaningful checkpoint.',
+        'Also ensure the required artifact is written if requested by the task description.',
+        'Do not exit immediately. Complete the task or write failed with explicit reason.',
+      ].join('\n');
+
+      await appendClaudeLog('system', `No-op recovery attempt ${attempt}/${MAX_NOOP_RETRY}`);
+      const retryResult = await runClaudeInterruptible(remediationPrompt, mcpConfigPath);
+
+      if (retryResult === 'paused') {
+        const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
+        const pauseMsgs = await drainInbox();
+        const pauseContext = pauseMsgs.length > 0 ? pauseMsgs.join(' ') : 'Creator requested alignment via /pause --task';
+        await writeProgress(
+          'waiting_for_human',
+          'Paused by creator during remediation',
+          pausedProgress?.percentComplete ?? 0,
+          { question: pauseContext },
+        );
+      }
+
+      const afterRetry = await safeReadJson(PROGRESS_PATH);
+      if (hasExecutionEvidence(afterRetry)) {
+        recovered = true;
+        break;
+      }
+    }
+
+    if (!recovered) {
+      await writeProgress('failed', 'Sandbox exited without meaningful execution evidence.', Number(current.percentComplete ?? 0), {
+        checkpointDescription: 'Auto-validation failed: no meaningful checkpoints',
+      });
+      console.error('[sandbox] No meaningful execution evidence. Marking failed.');
+      process.exit(1);
+    }
+  }
+
+  await writeProgress('completed', 'Sandbox agent finished execution.', 100, {
+    checkpointDescription: 'Sandbox run finished',
+  });
 
   console.log(`[sandbox] Task ${TASK_ID.slice(0, 8)} done.`);
 };

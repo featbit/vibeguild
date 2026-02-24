@@ -154,6 +154,8 @@ if (command === 'progress') {
   const p = safeReadJson(progressPath, {});
   const checkpoints = Array.isArray(p?.checkpoints) ? p.checkpoints : [];
   const latest = checkpoints[checkpoints.length - 1];
+  const latestAt = latest?.at ?? latest?.createdAt;
+  const latestText = latest?.description ?? latest?.message ?? latest?.summary ?? '-';
 
   console.log(`\nleader   : ${p?.leaderId ?? '-'}`);
   console.log(`age      : ${ageMin(task?.createdAt)}`);
@@ -165,7 +167,7 @@ if (command === 'progress') {
 
   if (checkpoints.length > 0) {
     console.log(`\ncheckpoints (${checkpoints.length} total, showing latest):`);
-    console.log(`  [${fmt(latest?.createdAt)}] ${truncate(latest?.summary, 72)}`);
+    console.log(`  [${fmt(latestAt)}] ${truncate(latestText, 72)}`);
   }
   process.exit(0);
 }

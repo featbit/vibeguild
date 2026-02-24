@@ -25,6 +25,15 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY (and optionally ANTHROPIC_BAS
 npm start              # start the world — runs continuously
 ```
 
+For `RUNTIME_MODE=docker`, `VIBEGUILD_GITHUB_TOKEN` is required. Every task must create a GitHub repo;
+if repo creation fails, the task is marked `failed`.
+
+Repo lifecycle (Docker mode):
+- Repo resolution is owned by sandbox entrypoint (not host orchestrator).
+- Naming rule: `task-<normalized-task-title>-<taskId8>` (readable + deterministic).
+- Reuse rule: exact-name match first (resume same task), then latest repo with same title prefix,
+  then create new (org first, user fallback).
+
 ## Human Operator Commands
 
 All commands load `.env` automatically. The world runs in its own terminal (`npm start`);
@@ -211,6 +220,14 @@ Dual state model:
 
 - **Execution truth**: GitHub commits, `output/` deliverables — deep technical detail.
 - **World truth**: `world/` progress + memory — creator-facing, intervention-ready.
+
+Runtime logs are persisted per task under `world/tasks/{id}/logs/` (for example
+`runtime.log`, `claude-code.log`, `docker.log`, `progress-events.ndjson`) and can be
+mirrored into task repos under `runtime-details/{taskId}/`.
+
+Compatibility guard (Docker runtime): if Claude exits `0` with empty stdout/stderr while
+`--mcp-config` is enabled, sandbox retries once without MCP config (still Claude CLI).
+This avoids silent no-op runs on some Anthropic-compatible endpoints.
 
 Sandbox isolation via precise Docker volume mounts (not prompt constraints):
 

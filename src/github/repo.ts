@@ -23,21 +23,33 @@ export const createTaskRepo = async (opts: CreateTaskRepoOptions): Promise<TaskR
   const repoName = `task-${opts.taskId.slice(0, 8)}`;
   const description = `Vibe Guild execution sandbox for: ${opts.taskTitle}`;
 
-  const response = await fetch(`https://api.github.com/orgs/${opts.org}/repos`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${opts.token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      name: repoName,
-      description,
-      private: true,
-      auto_init: true,
-    }),
-  });
+  const requestBody = {
+    name: repoName,
+    description,
+    private: true,
+    auto_init: true,
+  };
+
+  const headers = {
+    Authorization: `Bearer ${opts.token}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+  };
+
+  const createAt = async (url: string): Promise<Response> =>
+    fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(requestBody),
+    });
+
+  let response = await createAt(`https://api.github.com/orgs/${opts.org}/repos`);
+
+  // Fallback for PATs that don't have org repo permissions.
+  if (!response.ok && (response.status === 403 || response.status === 404)) {
+    response = await createAt('https://api.github.com/user/repos');
+  }
 
   if (!response.ok) {
     const body = await response.text();
