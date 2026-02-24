@@ -28,6 +28,9 @@ The system supports:
 
 3. **Dual truth model (non-conflicting)**
    - **Execution truth:** GitHub repo + runtime artifacts (detailed technical trace).
+     The GitHub repo is the **primary persistent workspace** — all intermediate and
+     final results must be committed there continuously. The repo survives Docker
+     restarts and is the anchor for resuming or continuing tasks.
    - **World truth:** `world/` summaries and metadata (operator-facing).
 
 4. **Cross-task continuity**
@@ -228,8 +231,10 @@ Assignment invariants:
          execution details (deep)
    +---------------------------------------------+
    | Execution Artifacts                         |
-   | - GitHub commits / PRs / issues             |
-   | - output/ deliverables (blogs, reports…)    |
+   | - GitHub repo: ALL intermediate + final      |
+   |   results committed continuously; README.md  |
+   |   updated with results summary at task end   |
+   | - output/{taskId}/ deliverables (local copy) |
    | - world/tasks/{taskId}/progress.json        |
    +----------------------+----------------------+
                  |
@@ -311,7 +316,7 @@ world/tasks/{taskId}/                    →   /workspace/world/tasks/{taskId}/ 
 world/tasks/{taskId}/claude-home/         →   /home/sandbox/.claude/                   :rw
 world/beings/{assignedId}/  (×N beings)  →   /workspace/world/beings/{assignedId}/   :rw
 world/shared/                            →   /workspace/world/shared/                 :ro
-output/                                  →   /workspace/output/                       :rw
+output/{taskId}/                         →   /workspace/output/                       :rw
 src/sandbox/entrypoint.mjs              →   /workspace/src/sandbox/entrypoint.mjs   :ro
 src/sandbox/mcp-servers.mjs             →   /workspace/src/sandbox/mcp-servers.mjs  :ro
 AGENTS.md                                →   /workspace/AGENTS.md                    :ro
@@ -322,6 +327,7 @@ AGENTS.md                                →   /workspace/AGENTS.md             
 | Action | Allowed? | Reason |
 |--------|----------|--------|
 | Write progress.json for its task | ✅ | `/workspace/world/tasks/{taskId}/` is rw |
+| Write task outputs / deliverables | ✅ | `output/{taskId}/` → `/workspace/output/` :rw; isolated per task |
 | Persist Claude conversation history | ✅ | `world/tasks/{taskId}/claude-home/` → `/home/sandbox/.claude/` :rw; conversation JSONL in `claude-home/projects/` |
 | Read dayCount from world.json | ✅ | `/workspace/world/memory/world.json` is ro |
 | Update its own beings' profile.json | ✅ | `/workspace/world/beings/{id}/` is rw |

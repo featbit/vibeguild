@@ -113,6 +113,82 @@ const createRepo = async (ownerOrNull, name) => {
   return res.json();
 };
 
+/**
+ * Overwrite README.md in a freshly created repo with a structured initial template.
+ * Uses the GitHub Contents API (PUT). Retries once after a short delay to handle
+ * the brief window after auto_init where the default commit may not be ready.
+ * @param {string} owner
+ * @param {string} repo
+ */
+const initRepoReadme = async (owner, repo) => {
+  const readmeContent = [
+    `# ${repo}`,
+    ``,
+    `**Vibe Guild** execution workspace for task \`${TASK_ID}\`.`,
+    ``,
+    `## Task`,
+    ``,
+    `${TASK_TITLE}`,
+    ``,
+    `### Description`,
+    ``,
+    `${TASK_DESCRIPTION || '_No additional description provided._'}`,
+    ``,
+    `## Results`,
+    ``,
+    `_Results will be added here when the task completes._`,
+    ``,
+    `---`,
+    ``,
+    `- **Task ID:** \`${TASK_ID}\``,
+    `- **Leader:** ${LEADER_ID}`,
+    `- **Team:** ${ASSIGNED_TO.join(', ')}`,
+    `- **Started:** ${new Date().toISOString()}`,
+  ].join('\n');
+
+  const encoded = Buffer.from(readmeContent, 'utf-8').toString('base64');
+
+  // Fetch the current SHA of README.md (needed for the PUT)
+  const getSha = async () => {
+    const res = await ghFetch(`https://api.github.com/repos/${owner}/${repo}/contents/README.md`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.sha ?? null;
+  };
+
+  const put = async (sha) => {
+    const body = {
+      message: 'chore: initialize README with task context',
+      content: encoded,
+      ...(sha ? { sha } : {}),
+    };
+    const res = await ghFetch(`https://api.github.com/repos/${owner}/${repo}/contents/README.md`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`README init failed: ${res.status} — ${txt}`);
+    }
+  };
+
+  // Retry once: auto_init commit may not be visible immediately
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      if (attempt > 1) await new Promise((r) => setTimeout(r, 3000));
+      const sha = await getSha();
+      await put(sha);
+      await appendClaudeLog('system', `README.md initialised for ${owner}/${repo}`);
+      return;
+    } catch (err) {
+      if (attempt === 2) {
+        await appendClaudeLog('system', `README init warning (non-fatal): ${err?.message ?? err}`);
+      }
+    }
+  }
+};
+
 const resolveSandboxRepo = async () => {
   const exactName = exactTaskRepoName();
   const prefix = taskRepoPrefix();
@@ -143,6 +219,7 @@ const resolveSandboxRepo = async () => {
     SANDBOX_REPO_URL = String(created?.html_url ?? '');
     if (SANDBOX_REPO_URL) {
       await appendClaudeLog('system', `Created org repo: ${SANDBOX_REPO_URL}`);
+      await initRepoReadme(GITHUB_OWNER, exactName).catch(() => undefined);
       return SANDBOX_REPO_URL;
     }
   } catch (err) {
@@ -153,6 +230,9 @@ const resolveSandboxRepo = async () => {
   SANDBOX_REPO_URL = String(createdUser?.html_url ?? '');
   if (!SANDBOX_REPO_URL) throw new Error('GitHub repo creation succeeded but html_url is empty.');
   await appendClaudeLog('system', `Created user repo fallback: ${SANDBOX_REPO_URL}`);
+  // Determine owner from the created repo URL for user-scoped repos
+  const userOwner = String(createdUser?.owner?.login ?? '');
+  if (userOwner) await initRepoReadme(userOwner, exactName).catch(() => undefined);
   return SANDBOX_REPO_URL;
 };
 
@@ -346,14 +426,31 @@ const buildPrompt = () => {
     lines.push(
       ``,
       `**Execution repo:** ${SANDBOX_REPO_URL}`,
-      `Push important artifacts, code, and notes there via git.`,
-      `Create and continuously update a details folder in that repo: ${TASK_DETAIL_DIR}/`,
-      `Required files in ${TASK_DETAIL_DIR}/:`,
-      `  - claude-code.log (raw runtime log excerpts)`,
-      `  - progress-snapshots.ndjson (append each milestone snapshot)`,
-      `  - artifacts-manifest.md (what was produced and where)`,
-      `Sync this folder to GitHub repeatedly during execution, not only at the end.`,
-      `Also mirror logs from world/tasks/${TASK_ID}/logs/ when relevant.`,
+      ``,
+      `This GitHub repo IS the persistent workspace for this task. All important intermediate`,
+      `and final results MUST be committed and pushed here — not only at the end, but`,
+      `continuously throughout execution after each meaningful milestone.`,
+      ``,
+      `Why this matters: future task runs and Docker sandbox resumes start from this repo.`,
+      `If an important result only exists in /workspace/output/ but NOT in the repo, it will`,
+      `be lost on container restart. The repo is the authoritative external memory.`,
+      ``,
+      `### Repo sync requirements (MANDATORY)`,
+      `1. Clone or set up the repo in /workspace at the start of execution.`,
+      `2. After every significant deliverable (draft, analysis, fetched data, etc.), commit`,
+      `   and push it to the repo. Do NOT wait until the task is fully done.`,
+      `3. At task completion, update README.md in the repo root:`,
+      `   - Add a "# Results" section (or update if it exists) summarising what was produced.`,
+      `   - List all output artifacts with their file paths and a one-line description.`,
+      `   - Include key findings, links, or URLs that were generated.`,
+      `   Commit and push the updated README.md as the final action before writing "completed".`,
+      `4. Keep a runtime-details folder synced: ${TASK_DETAIL_DIR}/`,
+      `   Required files in ${TASK_DETAIL_DIR}/:`,
+      `     - claude-code.log (raw runtime log excerpts)`,
+      `     - progress-snapshots.ndjson (append each milestone snapshot)`,
+      `     - artifacts-manifest.md (what was produced and where)`,
+      `   Sync this folder repeatedly during execution.`,
+      `5. Also mirror logs from world/tasks/${TASK_ID}/logs/ when relevant.`,
     );
   }
 

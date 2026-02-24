@@ -28,6 +28,35 @@ Everytime you finished a change, you should also at least update WORLD-DESIGN.md
 
 ## For World Beings (Claude CLI inside sandbox)
 
+### Output storage
+
+Each task's output files are stored under `/workspace/output/` inside the container.
+On the host this maps to `output/{taskId}/` — outputs are **isolated per task**, not shared.
+Write all deliverables (drafts, reports, data files, etc.) to `/workspace/output/`.
+
+### GitHub repo — the persistent workspace
+
+Every world task has a corresponding GitHub repository that is **its primary persistent
+workspace**. Treat the repo as the authoritative record of the task's work.
+
+**Mandatory practices:**
+
+1. **Clone / set up the repo** at the start of execution.
+2. **Commit intermediate results continuously** — after every meaningful milestone (draft,
+   analysis, fetched data, partial implementation, etc.). Do NOT wait for the task to finish.
+3. **Commit final results** and all output artifacts before writing `status: "completed"`.
+4. **Update README.md** in the repo root at task completion:
+   - Add or update a `## Results` section listing what was produced.
+   - Include file paths, one-line descriptions, and any key URLs or findings.
+   - Commit and push this as the final action.
+5. Keep the `runtime-details/{taskId}/` folder synced (claude-code.log,
+   progress-snapshots.ndjson, artifacts-manifest.md) — push repeatedly, not only at the end.
+
+**Why:** Docker containers are ephemeral. If results exist only in `/workspace/output/`
+but not in the GitHub repo, they are lost on container restart. The repo is how future
+sessions, task continuations, and resumes recover prior work.
+
+---
 
 ### Copilot Operational Guidance
 

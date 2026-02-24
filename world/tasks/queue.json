@@ -18,5 +18,25 @@
     "sandboxContainerId": "35ff55490c35dc43362d27004602a401e21dc0825c91a4990e7a07ec69b8e145",
     "sandboxRepoUrl": "https://github.com/vibeguild/task-claude-home-check3-write-ok-to-output-ch-bec08160",
     "completedAt": "2026-02-24T13:56:38.483Z"
+  },
+  {
+    "id": "82ef1698-376a-47c0-8a16-d91d21dc53e5",
+    "title": "帮助 FeatBit.co 找到 GEO（Generative Engine Optimization）最佳优化方案。要求：1) 广泛搜集权威来源的文章和指南，",
+    "description": "帮助 FeatBit.co 找到 GEO（Generative Engine Optimization）最佳优化方案。要求：1) 广泛搜集权威来源的文章和指南，重点包括 Perplexity、ChatGPT/OpenAI、Anthropic、Google 官方博客/文档等发布的关于 AI 搜索优化的内容；2) 系统整理 GEO 核心策略（结构化内容、权威引用、答案友好格式、schema markup 等）；3) 结合 FeatBit 是一个开源 Feature Flag 和 A/B 测试平台的特点，给出针对性的优化建议；4) 将完整报告写入 output/featbit-geo-strategy.md，包含每条建议的来源 URL；5) 所有中间成果和最终报告必须 commit 并推送到任务对应的 GitHub repo，并更新 README.md 的 Results 部分。",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-24T14:22:08.339Z",
+    "updatedAt": "2026-02-24T14:39:35.083Z",
+    "leaderId": "casey",
+    "assignedTo": [
+      "casey"
+    ],
+    "sandboxContainerId": "fd1be673a0ab545297983436a81a20968d0c4fffc2afc76ab4d86898b07a1779",
+    "sandboxRepoUrl": "https://github.com/vibeguild/task-featbit-co-geo-generative-engine-optimiz-82ef1698",
+    "completedAt": "2026-02-24T14:39:35.083Z"
   }
 ]

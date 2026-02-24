@@ -5,7 +5,7 @@
  *   - world/memory/world.json          :ro  — read dayCount, never write
  *   - world/tasks/{taskId}/             :rw  — progress.json + inbox.json (this task only)
  *   - world/beings/{id}/                :rw  — per assigned being only (other beings invisible)
- *   - output/                           :rw  — shared deliverables directory
+ *   - output/{taskId}/                  :rw  — per-task deliverables directory (isolated per task)
  *   - src/sandbox/entrypoint.mjs        :ro  — the script that drives execution
  *   - AGENTS.md                         :ro  — world rules and being identity
  *
@@ -150,10 +150,12 @@ export const createDockerSandboxAdapter = (
       const taskDetailsDir = `runtime-details/${task.id}`;
 
       const claudeHomeDir = join(taskDir, 'claude-home');
+      const taskOutputDir = join(cfg.workspaceRoot, 'output', taskId);
 
       await mkdir(taskDir, { recursive: true });
       await mkdir(logsDir, { recursive: true });
       await mkdir(claudeHomeDir, { recursive: true });
+      await mkdir(taskOutputDir, { recursive: true });
       await logRuntime(`Task runner starting (leader=${leaderId}, mode=docker)`);
 
       const containerName = `vibeguild-${taskId.slice(0, 8)}`;
@@ -178,7 +180,7 @@ export const createDockerSandboxAdapter = (
         '-v', `${taskDir}:/workspace/world/tasks/${taskId}`,
         '-v', `${claudeHomeDir}:/home/sandbox/.claude`,
         ...beingMounts,
-        '-v', `${join(cfg.workspaceRoot, 'output')}:/workspace/output`,
+        '-v', `${taskOutputDir}:/workspace/output`,
         '-w', '/workspace',
         '-e', `TASK_ID=${task.id}`,
         '-e', `TASK_TITLE=${encodeURIComponent(task.title)}`,
