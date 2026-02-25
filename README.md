@@ -22,6 +22,7 @@ execution details can live in the task's GitHub repository.
 ```bash
 npm install
 cp .env.example .env   # fill in ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL / ANTHROPIC_MODEL_ID)
+# Optional: add DISCORD_WEBHOOK_URL to .env for Discord notifications
 npm start              # start the world — runs continuously
 ```
 

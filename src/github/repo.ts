@@ -31,7 +31,7 @@ export const createTaskRepo = async (opts: CreateTaskRepoOptions): Promise<TaskR
   };
 
   const headers = {
-    Authorization: `Bearer ${opts.token}`,
+    Authorization: `token ${opts.token}`,
     Accept: 'application/vnd.github+json',
     'X-GitHub-Api-Version': '2022-11-28',
     'Content-Type': 'application/json',

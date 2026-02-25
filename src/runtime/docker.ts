@@ -206,6 +206,7 @@ export const createDockerSandboxAdapter = (
       await updateTaskSandbox(taskId, { containerId: ctx.containerId });
       await logRuntime(`Container started: ${ctx.containerId}`);
       console.log(`\n🐳 [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} started.`);
+      opts.onLog?.(`🐳 [Sandbox:${taskId.slice(0, 8)}] Container started.`);
 
       startProgressWatch();
 
@@ -225,6 +226,7 @@ export const createDockerSandboxAdapter = (
               await updateTaskStatus(taskId, 'completed');
               await logRuntime('Container finished successfully and progress status is completed.');
               console.log(`\n✅ [Sandbox:${taskId.slice(0, 8)}] Container finished successfully.`);
+              opts.onLog?.(`✅ [Sandbox:${taskId.slice(0, 8)}] Task completed!`);
               await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
               opts.onComplete?.(taskId);
               return;
@@ -237,6 +239,7 @@ export const createDockerSandboxAdapter = (
               : 'Container exited with code 0 but no progress.json was found.';
             await logRuntime(`FAILED: ${reason}`);
             console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${reason}`);
+            opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Failed: ${reason}`);
             await captureDockerLogs();
             await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
             opts.onError?.(taskId, new Error(reason));
@@ -250,6 +253,13 @@ export const createDockerSandboxAdapter = (
           const err = new Error(`Sandbox container exited with code ${exitCode}`);
           await logRuntime(`FAILED: ${err.message}`);
           console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${err.message}`);
+          // Capture container logs for Discord so the operator can diagnose failures
+          try {
+            const { stdout: logs, stderr: logsErr } = await execAsync(`docker logs ${ctx.containerId}`);
+            const allLogs = [logs.trim(), logsErr ? logsErr.trim() : ''].filter(Boolean).join('\n');
+            if (allLogs) opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode}\n${allLogs.slice(0, 1500)}`);
+            else opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode} — no logs`);
+          } catch { opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode}`); }
           opts.onError?.(taskId, err);
         } catch (err) {
           if (ctx.state !== 'paused') {

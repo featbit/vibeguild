@@ -62,7 +62,7 @@ const ghFetch = async (url, init = {}) => {
   const res = await fetch(url, {
     ...init,
     headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Authorization: `token ${GITHUB_TOKEN}`,
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       ...(init.headers ?? {}),

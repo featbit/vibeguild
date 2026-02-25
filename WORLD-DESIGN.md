@@ -605,3 +605,76 @@ This model keeps orchestration and execution decoupled:
 - task-level technical detail remains traceable in dedicated repos.
 
 In short: **repo answers “what happened in execution,” world answers “what should the creator do next.”**
+## Discord Operator Notifications
+
+Discord integration has two modes depending on which env vars are set.
+
+### Mode A — Webhook only (one-way push)
+
+Set `DISCORD_WEBHOOK_URL` in `.env`. All events push to one channel.
+
+### Mode B — Bot (native slash commands + per-task threads)
+
+Requires additionally `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
+`DISCORD_CONTROL_CHANNEL_ID` is only used for outbound webhook routing (optional label).
+
+**Two-channel architecture:**
+- **`#control-plane`** — ordinary text channel; world events pushed here via webhook; slash commands work in any channel
+- **`#tasks`** — **Forum channel**; each task automatically gets its own post (thread); all task progress is posted there via Bot API
+
+**Extra capabilities over Mode A:**
+- **Native slash commands** — registered automatically on bot startup (guild-scoped, instant):
+  ```
+  /task <description>    — add a new world task
+  /tasks                 — list all tasks with short IDs
+  /status <id>           — show task progress
+  /pause <id> [message]  — pause for alignment
+  /msg <id> <message>    — inject a message into running task
+  /done                  — end alignment session
+  ```
+- **Per-task forum posts** — each task gets its own forum post in `#tasks` when it starts; all progress goes there via Bot API
+
+**Bot setup:**
+1. [discord.com/developers/applications](https://discord.com/developers/applications) → New Application → Bot → Reset Token → copy token
+2. **No** Message Content Intent needed (slash commands don't require it)
+3. Use this invite URL (bot + slash commands scope, permissions=379968):
+   ```
+   https://discord.com/oauth2/authorize?client_id=<CLIENT_ID>&scope=bot+applications.commands&permissions=379968
+   ```
+4. In Discord Server Settings → Members, confirm the bot appears with the `APP` badge
+5. In the server Category that contains `#control-plane` and `#tasks`: Edit Category → Permissions → add VibeGuild bot → allow View Channels + Send Messages
+6. On each channel, click **Sync Now** to inherit the category permissions
+
+**.env additions:**
+```sh
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+DISCORD_BOT_TOKEN=your-bot-token-here
+DISCORD_CONTROL_CHANNEL_ID=<control-plane channel id>   # used for outbound label only
+DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
+```
+
+**Routing logic in `src/discord.ts`:**
+- World/global events → webhook → `#control-plane`
+- Task-specific events (progress, alignment) → Bot API → forum post thread in `#tasks`
+- If no thread registered for a task yet → falls back to webhook → `#control-plane`
+- Slash command interactions → Gateway WebSocket → `commandCallback` in `world.ts` → response via webhook to `#control-plane`
+
+### What gets mirrored
+
+| Event | Discord destination |
+|---|---|
+| World startup | Main channel |
+| Task runner starts | Main channel |
+| Task progress checkpoint 📍 | Task's thread (or main channel if no thread yet) |
+| Alignment requested 🤔 | Task's thread |
+| Alignment reply 💬 | Task's thread |
+| Alignment resolved ✅ | Task's thread |
+| Orchestrator CC reply 🧠 | Main channel |
+| Tasks assigned 📋 | Main channel |
+| Task recovery ♻️ | Main channel |
+
+### Implementation
+
+`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`
+Uses `discord.js` for Gateway WebSocket connection and slash command registration.
+Wired into `src/world.ts`. Slash commands are registered to all bot guilds on `ready`.

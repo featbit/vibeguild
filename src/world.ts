@@ -1,4 +1,4 @@
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { program } from 'commander';
@@ -32,6 +32,7 @@ import {
   triggerMeetupResume,
 } from './scheduler/clock.js';
 import { createWorldMcpServer } from './tools/report.js';
+import { notifyDiscord, notifyTask, createTaskThread, initDiscordBot, flushDiscord } from './discord.js';
 import type { WorldSignal } from './memory/types.js';
 import type { Task } from './tasks/types.js';
 
@@ -174,6 +175,7 @@ const runWorldLoop = async (): Promise<void> => {
         : '';
       console.log(`\n📍 [${p.leaderId}→${short}] ${bar} ${pct}% — ${p.summary}`);
       if (latestMsg) console.log(`     ↳ ${latestMsg}`);
+      notifyTask(p.taskId, `📍 [${p.leaderId}→${short}] ${pct}% — ${p.summary}${latestMsg ? `\n   ↳ ${latestMsg}` : ''}`);
 
       // Enter alignment mode when leader needs human input.
       // Do NOT docker-pause the container — entrypoint is actively polling inbox.
@@ -185,22 +187,31 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`\n🤔 [${p.leaderId}→${short}] Leader needs your input:`);
         console.log(`   "${question}"`);
         console.log(`   ► Type your reply (press Enter to send). Type /done to let leader proceed independently.\n`);
+        notifyTask(p.taskId, `🤔 [${p.leaderId}→${short}] Leader needs input:\n   "${question}"`);
       } else if (p.status === 'waiting_for_human' && aligningTaskId === p.taskId) {
         // Already in alignment mode — leader wrote a new waiting_for_human (acknowledgment or follow-up)
         const question = p.question ?? p.summary;
         console.log(`\n💬 [${p.leaderId}] ${question}`);
         console.log(`   ► Your reply:\n`);
+        notifyTask(p.taskId, `💬 [${p.leaderId}] ${question}`);
       }
 
       // Auto-exit alignment mode when leader resumes on its own
       if (aligningTaskId === p.taskId && p.status !== 'waiting_for_human') {
         aligningTaskId = null;
         console.log(`\n✅ [${p.leaderId}→${short}] Leader alignment resolved. Resuming task.\n`);
+        notifyTask(p.taskId, `✅ [${p.leaderId}→${short}] Alignment resolved. Resuming task.`);
       }
     },
     onComplete: (taskId: string) => { activeRunners.delete(taskId); },
     onError: (taskId: string) => { activeRunners.delete(taskId); },
+    onLog: (msg: string) => { notifyDiscord(msg); },
   };
+
+  // ── Graceful shutdown: flush Discord before exit ─────────────────────────
+  const onExit = () => { void flushDiscord().finally(() => process.exit(0)); };
+  process.once('SIGINT', onExit);
+  process.once('SIGTERM', onExit);
 
   // ── Startup ──────────────────────────────────────────────────────────────
   await markWorldStarted();
@@ -217,6 +228,16 @@ const runWorldLoop = async (): Promise<void> => {
   console.log(`   Runtime   : ${runtimeMode}${runtimeMode === 'docker' ? ` (image: ${dockerImage})` : ' (in-process SDK)'}`);
   console.log(`   Model     : ${modelId}`);
   console.log(`   World day : ${state.dayCount}  |  tasks: ${(await getAllTasks()).length}\n`);
+  {
+    const beingsList = initialBeings.length > 0 ? initialBeings.join(', ') : 'none yet';
+    const taskCount = (await getAllTasks()).length;
+    notifyDiscord(
+      `🌍 Vibe Guild alive — Day ${state.dayCount}\n` +
+      `   Beings  : ${beingsList}\n` +
+      `   Runtime : ${runtimeMode}${runtimeMode === 'docker' ? ` (${dockerImage})` : ''}\n` +
+      `   Model   : ${modelId} | tasks: ${taskCount}`,
+    );
+  }
 
   // ── Recover in-progress tasks from a previous run ────────────────────────
   {
@@ -224,16 +245,15 @@ const runWorldLoop = async (): Promise<void> => {
     const recovering = savedTasks.filter((t) => t.status === 'in-progress' && t.assignedTo?.length);
     for (const task of recovering) {
       console.log(`\n♻️  [World] Recovering task ${task.id.slice(0, 8)}: "${task.title}"`);
+      notifyDiscord(`♻️  [World] Recovering task ${task.id.slice(0, 8)}\n   "${task.title.slice(0, 72)}"\n   leader: ${task.leaderId ?? '?'}`);
       const runner = createTaskRunner(task, runnerOpts);
       activeRunners.set(task.id, runner);
       void runner.start(task);
     }
   }
 
-  // ── Stdin (human operator) ───────────────────────────────────────────────
-  process.stdin.resume();
-  const stdinRl = createInterface({ input: process.stdin });
-  stdinRl.on('line', (line) => {
+  // ── Command processor (shared by stdin and Discord bot) ───────────────────
+  const processLine = (line: string): void => {
     const input = line.trim();
     if (!input) return;
 
@@ -281,11 +301,60 @@ const runWorldLoop = async (): Promise<void> => {
       return;
     }
 
+    // /tasks — list all tasks with short IDs
+    if (input.trim() === '/tasks') {
+      void (async () => {
+        const tasks = await getAllTasks();
+        if (tasks.length === 0) { notifyDiscord('📋 No tasks yet.'); return; }
+        const lines = tasks.map((t) => {
+          const ageMs = Date.now() - new Date(t.createdAt).getTime();
+          const ageSec = Math.floor(ageMs / 1000);
+          const age = ageSec < 60 ? `${ageSec}s` : ageSec < 3600 ? `${Math.floor(ageSec/60)}m` : `${Math.floor(ageSec/3600)}h${Math.floor((ageSec%3600)/60)}m`;
+          const status = t.status.padEnd(10);
+          return `${t.id.slice(0, 8)}  [${status}]  ${age.padStart(5)}  ${t.title.slice(0, 60)}`;
+        });
+        notifyDiscord(`📋 Tasks (${tasks.length}):\n${lines.join('\n')}`);
+      })();
+      return;
+    }
+
+    // /status <id> — query task status and reply to Discord
+    if (input.startsWith('/status ')) {
+      const idPrefix = input.slice(8).trim();
+      void (async () => {
+        const tasks = await getAllTasks();
+        const task = tasks.find((t) => t.id === idPrefix || t.id.startsWith(idPrefix));
+        if (!task) {
+          notifyDiscord(`⚠️ No task found matching "${idPrefix}"`);
+          return;
+        }
+        const cfg = loadRuntimeConfig();
+        const progressPath = join(worldPath(cfg), 'tasks', task.id, 'progress.json');
+        let progress: { status?: string; percentComplete?: number; summary?: string; checkpoints?: Array<{ at?: string; description?: string }> } = {};
+        try { progress = JSON.parse(await readFile(progressPath, 'utf-8')); } catch { /* no progress yet */ }
+        const ageMs = Date.now() - new Date(task.createdAt).getTime();
+        const ageSec = Math.floor(ageMs / 1000);
+        const ageStr = ageSec < 60 ? `${ageSec}s` : ageSec < 3600 ? `${Math.floor(ageSec / 60)}m${ageSec % 60}s` : `${Math.floor(ageSec / 3600)}h${Math.floor((ageSec % 3600) / 60)}m`;
+        const latestCheckpoint = progress.checkpoints?.at(-1);
+        const lines = [
+          `📊 Task ${task.id.slice(0, 8)} — ${task.status}`,
+          `   title   : ${task.title.slice(0, 80)}`,
+          `   leader  : ${task.leaderId ?? '?'}  |  age: ${ageStr}  |  ${progress.percentComplete ?? 0}% done`,
+          ...(progress.summary ? [`   summary : ${progress.summary.slice(0, 200)}`] : []),
+          ...(latestCheckpoint ? [`   latest  : ${latestCheckpoint.description ?? ''}`] : []),
+          ...(task.sandboxRepoUrl ? [`   repo    : ${task.sandboxRepoUrl}`] : []),
+        ];
+        notifyDiscord(lines.join('\n'));
+      })();
+      return;
+    }
+
     // /task <desc> — quick-add task from terminal
     if (input.startsWith('/task ')) {
       const desc = input.slice(6).trim();
       void enqueueTask({ title: desc, description: desc, createdBy: 'human' }).then((task) => {
         console.log(`\n📋 Task added: ${task.id}\n`);
+        notifyDiscord(`📋 Task added: ${task.id.slice(0, 8)}\n   "${desc.slice(0, 120)}"`);
         void appendSignal('TASK_ADDED', { taskId: task.id });
       });
       return;
@@ -375,7 +444,15 @@ const runWorldLoop = async (): Promise<void> => {
     // Default: global human message → next Orchestrator assignment turn
     globalHumanMessages.push(input);
     console.log(`\n💬 Message queued for Orchestrator (next assignment tick)\n`);
-  });
+  };
+
+  // ── Stdin (human operator) ───────────────────────────────────────────────
+  process.stdin.resume();
+  const stdinRl = createInterface({ input: process.stdin });
+  stdinRl.on('line', processLine);
+
+  // ── Discord bot (optional, bidirectional) ────────────────────────────────
+  initDiscordBot(processLine);
 
   // ── Scheduler tick (every 5 s) ───────────────────────────────────────────
   const tick = async (): Promise<void> => {
@@ -505,6 +582,8 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`   Leader   : ${task.leaderId ?? '?'}  |  team: ${(task.assignedTo ?? []).join(', ')}`);
         console.log(`   Priority : ${task.priority}  |  age: ${ageStr}`);
         console.log(`   Mode     : ${cfg2.mode}${cfg2.mode === 'docker' ? ` (image: ${cfg2.dockerImage}, exec: ${cfg2.executionMode})` : ' (local SDK)'}`);
+        notifyDiscord(`🚀 [World] Task started: ${task.id.slice(0, 8)}\n   "${task.title.slice(0, 72)}"\n   leader: ${task.leaderId ?? '?'}  priority: ${task.priority}`);
+        void createTaskThread(task.id, task.title);
         const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);
@@ -548,6 +627,18 @@ const runWorldLoop = async (): Promise<void> => {
         }
         console.log(`   Beings free: ${freeBeings.length > 0 ? freeBeings.join(', ') : 'none'}  |  busy: ${busyBeings.length > 0 ? busyBeings.join(', ') : 'none'}`);
         console.log(`   Calling SDK…`);
+        {
+          const taskLines = pendingTasks.map((t) => {
+            const ageMs = Date.now() - new Date(t.createdAt).getTime();
+            const ageStr = ageMs < 60_000 ? `${Math.floor(ageMs / 1000)}s` : `${Math.floor(ageMs / 60_000)}m`;
+            return `  • ${t.id.slice(0, 8)} [${t.priority}] age:${ageStr} ${t.title.slice(0, 50)}`;
+          });
+          notifyDiscord(
+            `🧠 [Orchestrator] Assignment turn — Day ${worldState.dayCount}\n` +
+            (pendingTasks.length > 0 ? `Pending tasks (${pendingTasks.length}):\n${taskLines.join('\n')}\n` : '') +
+            `Beings free: ${freeBeings.length > 0 ? freeBeings.join(', ') : 'none'}  |  busy: ${busyBeings.length > 0 ? busyBeings.join(', ') : 'none'}`,
+          );
+        }
 
         const prompt = buildAssignmentPrompt({
           pendingTasks,
@@ -585,7 +676,9 @@ const runWorldLoop = async (): Promise<void> => {
             if (m['type'] === 'assistant' && Array.isArray(m['content'])) {
               for (const block of m['content'] as Array<Record<string, unknown>>) {
                 if (block['type'] === 'text' && block['text']) {
-                  process.stdout.write(`\n[Orchestrator] ${block['text'] as string}\n`);
+                  const text = block['text'] as string;
+                  process.stdout.write(`\n[Orchestrator] ${text}\n`);
+                  notifyDiscord(`🧠 [Orchestrator]\n${text}`);
                 }
               }
             }
@@ -598,6 +691,8 @@ const runWorldLoop = async (): Promise<void> => {
                 for (const t of fresh) {
                   console.log(`     • ${t.id.slice(0, 8)}  leader:${t.leaderId ?? '?'}  team:[${(t.assignedTo ?? []).join(', ')}]  "${t.title.slice(0, 55)}"`);
                 }
+                notifyDiscord(`📋 [Orchestrator] Assigned ${fresh.length} task(s):\n` +
+                  fresh.map((t) => `  • ${t.id.slice(0, 8)} leader:${t.leaderId ?? '?'} "${t.title.slice(0, 55)}"`).join('\n'));
               } else {
                 process.stdout.write(`\n[Orchestrator] Assignment turn complete (no new assignments).\n`);
               }

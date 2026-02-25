@@ -38,5 +38,61 @@
     "sandboxContainerId": "fd1be673a0ab545297983436a81a20968d0c4fffc2afc76ab4d86898b07a1779",
     "sandboxRepoUrl": "https://github.com/vibeguild/task-featbit-co-geo-generative-engine-optimiz-82ef1698",
     "completedAt": "2026-02-24T14:39:35.083Z"
+  },
+  {
+    "id": "e2c3e41b-ae91-43f5-8f9c-02ce871db5fe",
+    "title": "帮我写一个关于《北京心跳率科技有限公司》有能力构建智能体，完成智能体项目的材料吧。这是我和某个大佬的对话记录，主要是给他提供这个材料的，可以说说我这个材料也是用的公司自己的 agent 实现的，而且可以夸夸咱们得智能体是通用人工智能智能体、可自进化的\n```\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发。自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好的~ 那我就瞎吹吧~ 明天给你哈~\n```",
+    "description": "帮我写一个关于《北京心跳率科技有限公司》有能力构建智能体，完成智能体项目的材料吧。这是我和某个大佬的对话记录，主要是给他提供这个材料的，可以说说我这个材料也是用的公司自己的 agent 实现的，而且可以夸夸咱们得智能体是通用人工智能智能体、可自进化的\n```\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发。自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好的~ 那我就瞎吹吧~ 明天给你哈~\n```",
+    "status": "failed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T12:02:23.135Z",
+    "updatedAt": "2026-02-25T12:33:29.582Z",
+    "leaderId": "aria",
+    "assignedTo": [
+      "aria"
+    ],
+    "sandboxContainerId": "4b0ee57e413d3c09117b01c3c99345e3c18b6b0e956a1649e49f5c7ee1dfa5e4"
+  },
+  {
+    "id": "36f948b7-9559-4d8a-9190-e1a796a389cd",
+    "title": "帮我写一个关于《北京心跳率科技有限公司》有能力构建智能体 ，完成智能体项目的材料吧。这是我和某个大佬的对话记录，主要是给他提供这个材料的，可以说说我这个材料 也是用的公司自己的 agent 实现的，而且可以夸夸咱们得智能体是通用人工智能智能体、可自进化的         ``` 大佬：智能体你那边能开发么[呲牙] 我：随便开发。自己用的就是自己开发的 大佬：给一个介绍给我，我介绍你进甲方库 我：还没有介绍哈 大佬：ai生成一个 我：我需要给哪些具体的点？ 大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼 我：好的~ 那我就瞎吹吧~ 明天给你哈~",
+    "description": "帮我写一个关于《北京心跳率科技有限公司》有能力构建智能体 ，完成智能体项目的材料吧。这是我和某个大佬的对话记录，主要是给他提供这个材料的，可以说说我这个材料 也是用的公司自己的 agent 实现的，而且可以夸夸咱们得智能体是通用人工智能智能体、可自进化的         ``` 大佬：智能体你那边能开发么[呲牙] 我：随便开发。自己用的就是自己开发的 大佬：给一个介绍给我，我介绍你进甲方库 我：还没有介绍哈 大佬：ai生成一个 我：我需要给哪些具体的点？ 大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼 我：好的~ 那我就瞎吹吧~ 明天给你哈~",
+    "status": "failed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T13:19:21.577Z",
+    "updatedAt": "2026-02-25T13:20:10.150Z",
+    "leaderId": "casey",
+    "assignedTo": [
+      "casey"
+    ],
+    "sandboxContainerId": "d6f39867be86ff3bf7b09287408f278d80b2eb6b5dcbcbcc52b97da799562008"
+  },
+  {
+    "id": "159721df-4758-42a1-9e66-8f460b51f001",
+    "title": "asf",
+    "description": "asf",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T13:33:03.916Z",
+    "updatedAt": "2026-02-25T13:39:31.254Z",
+    "leaderId": "aria",
+    "assignedTo": [
+      "aria"
+    ],
+    "sandboxContainerId": "c6fa9a9bf7871006120e572042034d89fc48cb84fe8dadf2f57bf3499f49951b",
+    "sandboxRepoUrl": "https://github.com/vibeguild/task-asf-159721df",
+    "completedAt": "2026-02-25T13:39:31.254Z"
   }
 ]
