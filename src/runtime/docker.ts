@@ -206,7 +206,7 @@ export const createDockerSandboxAdapter = (
       await updateTaskSandbox(taskId, { containerId: ctx.containerId });
       await logRuntime(`Container started: ${ctx.containerId}`);
       console.log(`\n🐳 [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} started.`);
-      opts.onLog?.(`🐳 [Sandbox:${taskId.slice(0, 8)}] Container started.`);
+      opts.onLog?.(`🐳 [Sandbox:${taskId.slice(0, 8)}] Container started.`, taskId);
 
       startProgressWatch();
 
@@ -226,7 +226,9 @@ export const createDockerSandboxAdapter = (
               await updateTaskStatus(taskId, 'completed');
               await logRuntime('Container finished successfully and progress status is completed.');
               console.log(`\n✅ [Sandbox:${taskId.slice(0, 8)}] Container finished successfully.`);
-              opts.onLog?.(`✅ [Sandbox:${taskId.slice(0, 8)}] Task completed!`);
+              opts.onLog?.(`✅ [Sandbox:${taskId.slice(0, 8)}] Container finished successfully.`, taskId);
+              // Ensure onProgress fires with the final completed snapshot (watcher may have missed it)
+              if (progress) opts.onProgress?.(progress);
               await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
               opts.onComplete?.(taskId);
               return;
@@ -239,7 +241,7 @@ export const createDockerSandboxAdapter = (
               : 'Container exited with code 0 but no progress.json was found.';
             await logRuntime(`FAILED: ${reason}`);
             console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${reason}`);
-            opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Failed: ${reason}`);
+            opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Failed: ${reason}`, taskId);
             await captureDockerLogs();
             await execAsync(`docker rm ${ctx.containerId}`).catch(() => undefined);
             opts.onError?.(taskId, new Error(reason));
@@ -257,9 +259,9 @@ export const createDockerSandboxAdapter = (
           try {
             const { stdout: logs, stderr: logsErr } = await execAsync(`docker logs ${ctx.containerId}`);
             const allLogs = [logs.trim(), logsErr ? logsErr.trim() : ''].filter(Boolean).join('\n');
-            if (allLogs) opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode}\n${allLogs.slice(0, 1500)}`);
-            else opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode} — no logs`);
-          } catch { opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode}`); }
+            if (allLogs) opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode}\n${allLogs.slice(0, 1500)}`, taskId);
+            else opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode} — no logs`, taskId);
+          } catch { opts.onLog?.(`❌ [Sandbox:${taskId.slice(0, 8)}] Exit ${exitCode}`, taskId); }
           opts.onError?.(taskId, err);
         } catch (err) {
           if (ctx.state !== 'paused') {

@@ -19,7 +19,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { writeFile, readFile, mkdir, unlink, appendFile } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, unlink, appendFile, readdir, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getMcpServers } from './mcp-servers.mjs';
 
@@ -40,6 +40,88 @@ const PAUSE_SIGNAL_PATH = join(TASK_DIR, 'pause.signal');
 const PROGRESS_PATH = join(TASK_DIR, 'progress.json');
 const LOGS_DIR = join(TASK_DIR, 'logs');
 const CLAUDE_LOG_PATH = join(LOGS_DIR, 'claude-code.log');
+
+/**
+ * Run a child process and return stdout. Throws on non-zero exit.
+ * @param {string} cmd
+ * @param {string[]} args
+ * @param {object} [opts]
+ * @returns {Promise<string>}
+ */
+const runCmd = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
+  const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+  let out = '';
+  let err = '';
+  proc.stdout?.on('data', (d) => { out += d.toString(); });
+  proc.stderr?.on('data', (d) => { err += d.toString(); });
+  proc.once('close', (code) => {
+    if (code !== 0) reject(new Error(`${cmd} ${args[0] ?? ''} exited ${code}: ${err.slice(0, 500)}`));
+    else resolve(out.trim());
+  });
+  proc.once('error', reject);
+});
+
+/**
+ * Ensure all output files are committed and pushed to the task GitHub repo,
+ * and that sandboxRepoUrl is preserved in progress.json.
+ * Non-fatal — logs errors but never throws, never fails the task.
+ */
+const finalRepoSync = async () => {
+  if (!SANDBOX_REPO_URL || !GITHUB_TOKEN) return;
+  try {
+    // 1. Restore sandboxRepoUrl in progress.json if the agent stripped it
+    const cur = await safeReadJson(PROGRESS_PATH);
+    if (cur && !cur.sandboxRepoUrl) {
+      await writeFile(PROGRESS_PATH, JSON.stringify({ ...cur, sandboxRepoUrl: SANDBOX_REPO_URL }, null, 2), 'utf-8');
+      await appendClaudeLog('system', 'finalRepoSync: restored sandboxRepoUrl in progress.json');
+    }
+
+    // 2. Clone the task repo and push output files
+    const repoPath = SANDBOX_REPO_URL.replace('https://github.com/', '');
+    const authUrl = `https://${GITHUB_TOKEN}@github.com/${repoPath}.git`;
+    const CLONE_DIR = '/tmp/task-repo-sync';
+
+    await runCmd('git', ['clone', '--depth=1', authUrl, CLONE_DIR]).catch(async (cloneErr) => {
+      await appendClaudeLog('system', `finalRepoSync: clone failed (${cloneErr.message}), trying existing dir`);
+      await runCmd('git', ['-C', CLONE_DIR, 'remote', 'set-url', 'origin', authUrl]).catch(() => {});
+      await runCmd('git', ['-C', CLONE_DIR, 'pull', '--rebase']).catch(() => {});
+    });
+
+    await runCmd('git', ['-C', CLONE_DIR, 'config', 'user.email', 'sandbox@vibeguild.ai']).catch(() => {});
+    await runCmd('git', ['-C', CLONE_DIR, 'config', 'user.name', 'Vibe Guild Sandbox']).catch(() => {});
+
+    // Copy /workspace/output/* into output/ in the repo
+    const outputDir = '/workspace/output';
+    let outputFiles = [];
+    try { outputFiles = (await readdir(outputDir)).filter((f) => !f.startsWith('.')); } catch { /* empty */ }
+
+    if (outputFiles.length > 0) {
+      await mkdir(join(CLONE_DIR, 'output'), { recursive: true });
+      for (const file of outputFiles) {
+        await cp(join(outputDir, file), join(CLONE_DIR, 'output', file), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+
+    // Commit and push
+    await runCmd('git', ['-C', CLONE_DIR, 'add', '-A']);
+    const dirty = await runCmd('git', ['-C', CLONE_DIR, 'status', '--porcelain']).catch(() => '');
+    if (dirty.trim()) {
+      await runCmd('git', ['-C', CLONE_DIR, 'commit', '-m',
+        `chore: final output sync\n\nTask: ${TASK_TITLE}\nTask ID: ${TASK_ID}`]);
+      await runCmd('git', ['-C', CLONE_DIR, 'push', 'origin', 'HEAD:main']).catch(
+        () => runCmd('git', ['-C', CLONE_DIR, 'push', 'origin', 'HEAD'])
+      );
+      await appendClaudeLog('system', `finalRepoSync: pushed ${outputFiles.length} output file(s) to ${SANDBOX_REPO_URL}`);
+      console.log(`[sandbox] finalRepoSync: synced output to ${SANDBOX_REPO_URL}`);
+    } else {
+      await appendClaudeLog('system', 'finalRepoSync: nothing new to push (repo already up to date)');
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await appendClaudeLog('system', `finalRepoSync failed (non-fatal): ${msg}`).catch(() => {});
+    console.error('[sandbox] finalRepoSync failed:', msg);
+  }
+};
 
 const appendClaudeLog = async (stream, text) => {
   const ts = new Date().toISOString();
@@ -92,9 +174,15 @@ const listCandidateRepos = async (owner, prefix) => {
 };
 
 const createRepo = async (ownerOrNull, name) => {
+  // GitHub repo description: strip control chars + backticks, collapse whitespace, max 350 chars
+  const safeDesc = `Vibe Guild task: ${TASK_TITLE}`
+    .replace(/[`\x00-\x1F\x7F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 350);
   const body = {
     name,
-    description: `Vibe Guild execution sandbox for task ${TASK_ID}: ${TASK_TITLE}`,
+    description: safeDesc,
     private: true,
     auto_init: true,
   };
@@ -223,17 +311,11 @@ const resolveSandboxRepo = async () => {
       return SANDBOX_REPO_URL;
     }
   } catch (err) {
-    await appendClaudeLog('system', `Org repo create failed (${GITHUB_OWNER}): ${err?.message ?? err}`);
+    // Org-scoped fine-grained PATs cannot create user repos — surface the real error
+    throw new Error(`GitHub create repo failed: ${err?.message ?? err}`);
   }
 
-  const createdUser = await createRepo(null, exactName);
-  SANDBOX_REPO_URL = String(createdUser?.html_url ?? '');
-  if (!SANDBOX_REPO_URL) throw new Error('GitHub repo creation succeeded but html_url is empty.');
-  await appendClaudeLog('system', `Created user repo fallback: ${SANDBOX_REPO_URL}`);
-  // Determine owner from the created repo URL for user-scoped repos
-  const userOwner = String(createdUser?.owner?.login ?? '');
-  if (userOwner) await initRepoReadme(userOwner, exactName).catch(() => undefined);
-  return SANDBOX_REPO_URL;
+  throw new Error('GitHub repo creation succeeded but html_url is empty.');
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -909,6 +991,7 @@ const run = async () => {
   }
 
   if (current.status === 'completed') {
+    await finalRepoSync();
     console.log(`[sandbox] Task ${TASK_ID.slice(0, 8)} done.`);
     return;
   }
@@ -973,6 +1056,7 @@ const run = async () => {
   await writeProgress('completed', 'Sandbox agent finished execution.', 100, {
     checkpointDescription: 'Sandbox run finished',
   });
+  await finalRepoSync();
 
   console.log(`[sandbox] Task ${TASK_ID.slice(0, 8)} done.`);
 };

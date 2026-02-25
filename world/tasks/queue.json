@@ -94,5 +94,101 @@
     "sandboxContainerId": "c6fa9a9bf7871006120e572042034d89fc48cb84fe8dadf2f57bf3499f49951b",
     "sandboxRepoUrl": "https://github.com/vibeguild/task-asf-159721df",
     "completedAt": "2026-02-25T13:39:31.254Z"
+  },
+  {
+    "id": "0ff3af37-ba05-4d05-b54a-3c400f909130",
+    "title": "大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。",
+    "description": "大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。",
+    "status": "failed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T14:44:35.961Z",
+    "updatedAt": "2026-02-25T14:45:39.711Z",
+    "leaderId": "aria",
+    "assignedTo": [
+      "aria"
+    ],
+    "sandboxContainerId": "47a6b33e5ea0eb8fb0f743413c8661e6732692ee4c1ee797d26ad28c0a3ff9ff"
+  },
+  {
+    "id": "122f9514-4bd4-4a62-98dd-83a56952fcd3",
+    "title": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n```\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n```",
+    "description": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n```\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n```",
+    "status": "failed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T14:51:14.397Z",
+    "updatedAt": "2026-02-25T14:52:12.313Z",
+    "leaderId": "blake",
+    "assignedTo": [
+      "blake"
+    ],
+    "sandboxContainerId": "4711a1364445ac7cefd0e5dcd845c53cd4ccb812e173800ef7771e2084bcc5dd"
+  },
+  {
+    "id": "2c446c69-8149-423a-9a40-34bd5965bc84",
+    "title": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n```\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n```",
+    "description": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n```\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n```",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T15:03:35.855Z",
+    "updatedAt": "2026-02-25T15:10:25.577Z",
+    "leaderId": "casey",
+    "assignedTo": [
+      "casey"
+    ],
+    "sandboxContainerId": "fd1ad43a014bde9c3ba9ef1f97e0cbd67b846c4f97d2e3edccf864dc46536879",
+    "sandboxRepoUrl": "https://github.com/vibeguild/task-agent-ai-ai-openclawd-coding-search-tool-2c446c69",
+    "completedAt": "2026-02-25T15:10:25.576Z"
+  },
+  {
+    "id": "c3b83744-8113-40ae-a44e-b7db55445f7e",
+    "title": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n---\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n---\n生成的结果要用户有好的同步到github repo啊，我只能从 github repo 去看你的最终结果，同志们",
+    "description": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n---\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n---\n生成的结果要用户有好的同步到github repo啊，我只能从 github repo 去看你的最终结果，同志们",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T15:36:41.346Z",
+    "updatedAt": "2026-02-25T15:49:40.603Z",
+    "leaderId": "casey",
+    "assignedTo": [
+      "casey"
+    ],
+    "sandboxContainerId": "8ca3e4bdca3d339f3f3d5710ae4df762f091f6567b26cde80837afd004a7e222",
+    "sandboxRepoUrl": "https://github.com/vibeguild/task-agent-ai-ai-openclawd-coding-search-tool-2c446c69",
+    "completedAt": "2026-02-25T15:49:40.603Z"
+  },
+  {
+    "id": "f3276e38-418d-4f9f-afc9-cacd089833b2",
+    "title": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n---\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n---\n生成的结果要用户有好的同步到github repo啊，我只能从 github repo 去看你的最终结果，同志们",
+    "description": "生成一个《心跳率科技有限公司》的Agent研发能力展示书，如下是我和一个大佬的对话：\n---\n大佬：智能体你那边能开发么[呲牙]\n我：随便开发；自己用的就是自己开发的\n大佬：给一个介绍给我，我介绍你进甲方库\n我：还没有介绍哈\n大佬：ai生成一个\n我：我需要给哪些具体的点？\n大佬：团队吹牛逼，AI能力吹牛逼，智能体开发牛逼\n我：好吧，那我就吹一下我们可以做通用人工智能智能体，如 openclawd；并且当前这个公司能力介绍就是用自己的智能体写的。不光有 coding 能力，search 能力，还有各种调用工具的能力，可以让智能体共识参与多个独立的任务，有非常好的环境隔离能力，可以调用各种tool和agent skills，并且有自迭代能力，支持多模态能力。\n---\n生成的结果要用户有好的同步到github repo啊，我只能从 github repo 去看你的最终结果，同志们",
+    "status": "completed",
+    "type": "work",
+    "priority": "normal",
+    "createdBy": "human",
+    "dependencies": [],
+    "requiresPlanApproval": false,
+    "createdAt": "2026-02-25T15:37:12.059Z",
+    "updatedAt": "2026-02-25T15:47:51.385Z",
+    "leaderId": "aria",
+    "assignedTo": [
+      "aria"
+    ],
+    "sandboxContainerId": "c8b9886d9b007d6d14c8dd82f4a5312ba4b0966c5dd1443331f21c3bcbd0bb83",
+    "sandboxRepoUrl": "https://github.com/vibeguild/task-agent-ai-ai-openclawd-coding-search-tool-2c446c69",
+    "completedAt": "2026-02-25T15:47:51.385Z"
   }
 ]

@@ -38,7 +38,7 @@ export type AdapterOptions = {
   onComplete?: (taskId: string) => void;
   onError?: (taskId: string, err: Error) => void;
   /** Called with important sandbox lifecycle messages (container start, fail, logs). */
-  onLog?: (message: string) => void;
+  onLog?: (message: string, taskId: string) => void;
 };
 
 /**

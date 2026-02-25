@@ -32,7 +32,7 @@ import {
   triggerMeetupResume,
 } from './scheduler/clock.js';
 import { createWorldMcpServer } from './tools/report.js';
-import { notifyDiscord, notifyTask, createTaskThread, initDiscordBot, flushDiscord } from './discord.js';
+import { notifyDiscord, notifyTask, createTaskThread, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread } from './discord.js';
 import type { WorldSignal } from './memory/types.js';
 import type { Task } from './tasks/types.js';
 
@@ -163,6 +163,10 @@ const runWorldLoop = async (): Promise<void> => {
   const runnerOpts = {
     mcpServer,
     modelId: process.env.ANTHROPIC_MODEL_ID,
+    // Track which tasks have had their repo URL posted to Discord (to post only once)
+    _seenRepoUrls: new Set<string>(),
+    // Track which tasks have had their final output summary posted (to post only once)
+    _seenFinalOutput: new Set<string>(),
     onProgress: (p: import('./runtime/adapter.js').SyncedProgress) => {
       const short = p.taskId.slice(0, 8);
       const pct = p.percentComplete ?? 0;
@@ -176,6 +180,12 @@ const runWorldLoop = async (): Promise<void> => {
       console.log(`\n📍 [${p.leaderId}→${short}] ${bar} ${pct}% — ${p.summary}`);
       if (latestMsg) console.log(`     ↳ ${latestMsg}`);
       notifyTask(p.taskId, `📍 [${p.leaderId}→${short}] ${pct}% — ${p.summary}${latestMsg ? `\n   ↳ ${latestMsg}` : ''}`);
+
+      // Post GitHub repo URL to the task thread exactly once
+      if (p.sandboxRepoUrl && !runnerOpts._seenRepoUrls.has(p.taskId)) {
+        runnerOpts._seenRepoUrls.add(p.taskId);
+        updateTaskThreadWithRepo(p.taskId, p.sandboxRepoUrl);
+      }
 
       // Enter alignment mode when leader needs human input.
       // Do NOT docker-pause the container — entrypoint is actively polling inbox.
@@ -202,10 +212,31 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`\n✅ [${p.leaderId}→${short}] Leader alignment resolved. Resuming task.\n`);
         notifyTask(p.taskId, `✅ [${p.leaderId}→${short}] Alignment resolved. Resuming task.`);
       }
+
+      // Post final output summary when the task is done
+      if ((p.status === 'completed' || p.status === 'failed') && !runnerOpts._seenFinalOutput.has(p.taskId)) {
+        runnerOpts._seenFinalOutput.add(p.taskId);
+        // Update the thread title with ✅ / ❌
+        void closeTaskThread(p.taskId, p.status);
+        const emoji = p.status === 'completed' ? '🎉' : '💀';
+        const label = p.status === 'completed' ? 'Task completed' : 'Task failed';
+        const lines: string[] = [`${emoji} **${label}**`];
+        if (p.summary) lines.push(`> ${p.summary}`);
+        if (Array.isArray(p.checkpoints) && p.checkpoints.length > 0) {
+          const recent = p.checkpoints.slice(-5);
+          lines.push('**Steps:**');
+          for (const cp of recent) {
+            const desc = (cp as Record<string, unknown>)['description'] as string | undefined;
+            if (desc) lines.push(`• ${desc}`);
+          }
+        }
+        if (p.sandboxRepoUrl) lines.push(`🔗 ${p.sandboxRepoUrl}`);
+        notifyTask(p.taskId, lines.join('\n'));
+      }
     },
     onComplete: (taskId: string) => { activeRunners.delete(taskId); },
     onError: (taskId: string) => { activeRunners.delete(taskId); },
-    onLog: (msg: string) => { notifyDiscord(msg); },
+    onLog: (msg: string, taskId: string) => { notifyDiscord(msg); notifyTask(taskId, msg); },
   };
 
   // ── Graceful shutdown: flush Discord before exit ─────────────────────────
@@ -246,6 +277,7 @@ const runWorldLoop = async (): Promise<void> => {
     for (const task of recovering) {
       console.log(`\n♻️  [World] Recovering task ${task.id.slice(0, 8)}: "${task.title}"`);
       notifyDiscord(`♻️  [World] Recovering task ${task.id.slice(0, 8)}\n   "${task.title.slice(0, 72)}"\n   leader: ${task.leaderId ?? '?'}`);
+      void createTaskThread(task);
       const runner = createTaskRunner(task, runnerOpts);
       activeRunners.set(task.id, runner);
       void runner.start(task);
@@ -583,7 +615,7 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`   Priority : ${task.priority}  |  age: ${ageStr}`);
         console.log(`   Mode     : ${cfg2.mode}${cfg2.mode === 'docker' ? ` (image: ${cfg2.dockerImage}, exec: ${cfg2.executionMode})` : ' (local SDK)'}`);
         notifyDiscord(`🚀 [World] Task started: ${task.id.slice(0, 8)}\n   "${task.title.slice(0, 72)}"\n   leader: ${task.leaderId ?? '?'}  priority: ${task.priority}`);
-        void createTaskThread(task.id, task.title);
+        void createTaskThread(task);
         const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);
