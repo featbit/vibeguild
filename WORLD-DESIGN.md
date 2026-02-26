@@ -613,20 +613,37 @@ Discord integration has two modes depending on which env vars are set.
 
 Set `DISCORD_WEBHOOK_URL` in `.env`. All events push to one channel.
 
-### Mode B — Bot (native slash commands + per-task threads)
+### Mode B — Bot (conversational @mention + slash commands + per-task threads)
 
 Requires additionally `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
 `DISCORD_CONTROL_CHANNEL_ID` is only used for outbound webhook routing (optional label).
 
 **Two-channel architecture:**
-- **`#control-plane`** — ordinary text channel; world events pushed here via webhook; slash commands work in any channel
+- **`#control-plane`** — ordinary text channel; world events pushed here via webhook; **primary place for @mentioning the bot**
 - **`#tasks`** — **Forum channel**; each task automatically gets its own post (thread); all task progress is posted there via Bot API
 
 **Extra capabilities over Mode A:**
-- **Native slash commands** — registered automatically on bot startup (guild-scoped, instant):
+
+- **Conversational @mention (primary interface)** — @mention the bot in any channel with natural language:
   ```
-  /task <description>    — add a new world task
-  /tasks                 — list all tasks with short IDs
+  @VibeGuild new task: write a blog post about feature flags
+  @VibeGuild list tasks
+  @VibeGuild status abc12345
+  @VibeGuild pause abc12345 please review the research direction
+  @VibeGuild msg abc12345: stop and wait for me
+  @VibeGuild done
+  ```
+  The bot parses the intent, **confirms** destructive/creative actions before executing, then replies in the same channel with progress. Results (task list, status) arrive via the control-plane webhook.
+
+  **Confirmation flow for new tasks:**
+  1. @mention with a task description → bot replies with a preview and asks "Shall I proceed? (yes/no)"
+  2. Reply `yes` (or `ok`, `go`, `确认`) → bot creates the task
+  3. Reply `no` (or `cancel`) → bot cancels
+
+- **Native slash commands** — still available as fallback, registered automatically on startup:
+  ```
+  /new                   — open multiline modal to create a task
+  /tasks                 — list all tasks
   /status <id>           — show task progress
   /pause <id> [message]  — pause for alignment
   /msg <id> <message>    — inject a message into running task
@@ -636,7 +653,7 @@ Requires additionally `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
 
 **Bot setup:**
 1. [discord.com/developers/applications](https://discord.com/developers/applications) → New Application → Bot → Reset Token → copy token
-2. **No** Message Content Intent needed (slash commands don't require it)
+2. **Enable Privileged Gateway Intents** in the Bot page → scroll to "Privileged Gateway Intents" → enable **Message Content Intent** (required for @mention reading)
 3. Use this invite URL (bot + slash commands scope, permissions=379968):
    ```
    https://discord.com/oauth2/authorize?client_id=<CLIENT_ID>&scope=bot+applications.commands&permissions=379968
@@ -657,7 +674,8 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 - World/global events → webhook → `#control-plane`
 - Task-specific events (progress, alignment) → Bot API → forum post thread in `#tasks`
 - If no thread registered for a task yet → falls back to webhook → `#control-plane`
-- Slash command interactions → Gateway WebSocket → `commandCallback` in `world.ts` → response via webhook to `#control-plane`
+- @mention interactions → `messageCreate` Gateway event → intent parser → confirmation flow → `commandCallback` in `world.ts` → response via Bot API reply in same channel + webhook for result output
+- Slash command interactions → `interactionCreate` Gateway event → `commandCallback` in `world.ts` → response via webhook to `#control-plane`
 
 ### What gets mirrored
 
@@ -675,6 +693,8 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 
 ### Implementation
 
-`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`
-Uses `discord.js` for Gateway WebSocket connection and slash command registration.
-Wired into `src/world.ts`. Slash commands are registered to all bot guilds on `ready`.
+`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`, `sendDirectReply()`, `parseIntent()`
+Uses `discord.js` for Gateway WebSocket connection, @mention handling (`messageCreate` with `GuildMessages` + `MessageContent` intents), and slash command registration.
+Wired into `src/world.ts`. Slash commands registered to all bot guilds on `ready`. @mention handler with confirmation flow runs in parallel.
+
+> **⚠️ Privileged Intent**: `MessageContent` intent must be enabled in the Discord Developer Portal (Bot page → Privileged Gateway Intents) before @mention reading will work.

@@ -163,16 +163,6 @@ const getRepoIfExists = async (owner, repo) => {
   return res.json();
 };
 
-const listCandidateRepos = async (owner, prefix) => {
-  const res = await ghFetch(`https://api.github.com/orgs/${owner}/repos?type=private&per_page=100&sort=updated`);
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`GitHub list repos failed: ${res.status} — ${body}`);
-  }
-  const repos = await res.json();
-  return Array.isArray(repos) ? repos.filter((r) => String(r?.name ?? '').startsWith(prefix)) : [];
-};
-
 const createRepo = async (ownerOrNull, name) => {
   // GitHub repo description: strip control chars + backticks, collapse whitespace, max 350 chars
   const safeDesc = `Vibe Guild task: ${TASK_TITLE}`
@@ -279,27 +269,15 @@ const initRepoReadme = async (owner, repo) => {
 
 const resolveSandboxRepo = async () => {
   const exactName = exactTaskRepoName();
-  const prefix = taskRepoPrefix();
-  await appendClaudeLog('system', `Resolving task repo by exact name ${exactName} or prefix ${prefix}-*`);
+  await appendClaudeLog('system', `Resolving task repo by exact name: ${exactName}`);
 
+  // Only reuse a repo when the exact name matches (includes task ID suffix).
+  // Never reuse by prefix alone — two tasks with similar titles would share the same repo.
   const exact = await getRepoIfExists(GITHUB_OWNER, exactName).catch(() => null);
   if (exact?.html_url) {
     SANDBOX_REPO_URL = exact.html_url;
     await appendClaudeLog('system', `Resolved existing exact repo: ${SANDBOX_REPO_URL}`);
     return SANDBOX_REPO_URL;
-  }
-
-  try {
-    const candidates = await listCandidateRepos(GITHUB_OWNER, prefix);
-    if (candidates.length > 0) {
-      SANDBOX_REPO_URL = String(candidates[0].html_url ?? '');
-      if (SANDBOX_REPO_URL) {
-        await appendClaudeLog('system', `Reusing latest repo by prefix: ${SANDBOX_REPO_URL}`);
-        return SANDBOX_REPO_URL;
-      }
-    }
-  } catch (err) {
-    await appendClaudeLog('system', `Org repo listing failed (${GITHUB_OWNER}): ${err?.message ?? err}`);
   }
 
   try {
