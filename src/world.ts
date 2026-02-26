@@ -32,7 +32,8 @@ import {
   triggerMeetupResume,
 } from './scheduler/clock.js';
 import { createWorldMcpServer } from './tools/report.js';
-import { notifyDiscord, notifyTask, createTaskThread, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread } from './discord.js';
+import { notifyDiscord, notifyDiscordRaw, notifyTask, createTaskThread, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread, getTaskThreadMention, getTaskThreadUrl, setPendingConfirm, getActiveThreadLinks } from './discord.js';
+import type { OnMentionFn } from './discord.js';
 import type { WorldSignal } from './memory/types.js';
 import type { Task } from './tasks/types.js';
 
@@ -343,9 +344,12 @@ const runWorldLoop = async (): Promise<void> => {
           const ageSec = Math.floor(ageMs / 1000);
           const age = ageSec < 60 ? `${ageSec}s` : ageSec < 3600 ? `${Math.floor(ageSec/60)}m` : `${Math.floor(ageSec/3600)}h${Math.floor((ageSec%3600)/60)}m`;
           const status = t.status.padEnd(10);
-          return `${t.id.slice(0, 8)}  [${status}]  ${age.padStart(5)}  ${t.title.slice(0, 60)}`;
+          const threadUrl = getTaskThreadUrl(t.id);
+          const threadMention = getTaskThreadMention(t.id);
+          const threadPart = threadUrl ? `  \u2192 [thread](${threadUrl})` : threadMention ? `  \u2192 ${threadMention}` : '';
+          return `\`${t.id.slice(0, 8)}\`  [${status.trim()}]  ${age}  ${t.title.slice(0, 50)}${threadPart}`;
         });
-        notifyDiscord(`📋 Tasks (${tasks.length}):\n${lines.join('\n')}`);
+        notifyDiscordRaw(`**\ud83d\udccb Tasks (${tasks.length})**\n${lines.join('\n')}\n\n\ud83d\udc49 Click a thread link to reply in context.`);
       })();
       return;
     }
@@ -368,15 +372,18 @@ const runWorldLoop = async (): Promise<void> => {
         const ageSec = Math.floor(ageMs / 1000);
         const ageStr = ageSec < 60 ? `${ageSec}s` : ageSec < 3600 ? `${Math.floor(ageSec / 60)}m${ageSec % 60}s` : `${Math.floor(ageSec / 3600)}h${Math.floor((ageSec % 3600) / 60)}m`;
         const latestCheckpoint = progress.checkpoints?.at(-1);
+        const threadMention = getTaskThreadMention(task.id);
+        const threadUrl = getTaskThreadUrl(task.id);
         const lines = [
-          `📊 Task ${task.id.slice(0, 8)} — ${task.status}`,
-          `   title   : ${task.title.slice(0, 80)}`,
-          `   leader  : ${task.leaderId ?? '?'}  |  age: ${ageStr}  |  ${progress.percentComplete ?? 0}% done`,
-          ...(progress.summary ? [`   summary : ${progress.summary.slice(0, 200)}`] : []),
-          ...(latestCheckpoint ? [`   latest  : ${latestCheckpoint.description ?? ''}`] : []),
-          ...(task.sandboxRepoUrl ? [`   repo    : ${task.sandboxRepoUrl}`] : []),
+          `**\ud83d\udcca Task \`${task.id.slice(0, 8)}\` \u2014 ${task.status}**`,
+          `> title   : ${task.title.slice(0, 80)}`,
+          `> leader  : ${task.leaderId ?? '?'}  |  age: ${ageStr}  |  ${progress.percentComplete ?? 0}% done`,
+          ...(progress.summary ? [`> summary : ${progress.summary.slice(0, 200)}`] : []),
+          ...(latestCheckpoint ? [`> latest  : ${latestCheckpoint.description ?? ''}`] : []),
+          ...(task.sandboxRepoUrl ? [`> repo    : ${task.sandboxRepoUrl}`] : []),
+          ...(threadUrl ? [`> thread  : [Open thread \u2192](${threadUrl})`] : threadMention ? [`> thread  : ${threadMention}`] : []),
         ];
-        notifyDiscord(lines.join('\n'));
+        notifyDiscordRaw(lines.join('\n'));
       })();
       return;
     }
@@ -478,13 +485,161 @@ const runWorldLoop = async (): Promise<void> => {
     console.log(`\n💬 Message queued for Orchestrator (next assignment tick)\n`);
   };
 
+  // ── Claude-powered @mention handler ─────────────────────────────────────
+  const handleMention: OnMentionFn = async (text, username, userId, channelId, reply): Promise<void> => {
+    const cfg = loadRuntimeConfig();
+    const apiKey = cfg.anthropicApiKey;
+    if (!apiKey) {
+      await reply('❌ ANTHROPIC_API_KEY not set — cannot process natural language.');
+      return;
+    }
+    const baseUrl = cfg.anthropicBaseUrl
+      ? cfg.anthropicBaseUrl.replace(/\/$/, '')
+      : 'https://api.anthropic.com';
+    const model = cfg.anthropicModel || 'claude-haiku-4-5';
+
+    // Build rich task context for Claude
+    const allTasks = await getAllTasks();
+    const now = Date.now();
+    const taskLines = allTasks.length === 0
+      ? '  (no tasks yet)'
+      : allTasks.map((t) => {
+          const ageMs = now - new Date(t.createdAt ?? now).getTime();
+          const ageH  = Math.round(ageMs / 36e5);
+          const age   = ageH < 1 ? 'just now' : ageH < 24 ? `${ageH}h ago` : `${Math.round(ageH / 24)}d ago`;
+          const short = t.id.slice(0, 8);
+          const leader = (t as Record<string, unknown>)['leader'] as string | undefined;
+          const prog = (t as Record<string, unknown>)['progress'] as string | undefined;
+          const leaderTag = leader ? ` [${leader}]` : '';
+          const progTag = prog ? ` — ${prog.slice(0, 80)}` : '';
+          return `  ${short} [${t.status}]${leaderTag} "${(t.title ?? '').slice(0, 70)}" (${age})${progTag}`;
+        }).join('\n');
+
+    const threadLines = getActiveThreadLinks().map((th) =>
+      `  ${th.short} → ${th.url ?? th.mention} "${th.title.slice(0, 60)}"`
+    ).join('\n') || '  (no active threads)';
+
+    const systemPrompt = [
+      'You are the Vibe Guild operator assistant bot.',
+      'Vibe Guild is an autonomous AI world where Claude AI agents (called "beings") run tasks in isolated Docker containers.',
+      'You help the human operator manage the world through Discord @mentions.',
+      '',
+      '## Available Commands (you can trigger these)',
+      '- `/tasks` — list all tasks with status, progress, and Discord thread links',
+      '- `/status <8-char-id>` — detailed progress snapshot for a specific task',
+      '- `/task <full description>` — create a NEW task (ALWAYS ask for confirmation first)',
+      '- `/pause --task <8-char-id> [message]` — pause a running task for alignment/conversation',
+      '- `/msg --task <8-char-id> <message>` — inject a message into a running task',
+      '- `/done` — end alignment mode, let the leader continue independently',
+      '',
+      '## Current World State',
+      `Tasks (${allTasks.length} total):`,
+      taskLines,
+      '',
+      'Active Discord threads:',
+      threadLines,
+      '',
+      '## Response Instructions',
+      '- Understand the human\'s intent in ANY language (Chinese or English)',
+      '- Reason from the task data above to answer questions DIRECTLY without always running commands',
+      '- Only put commands in the "commands" array when an action is truly needed',
+      '- For creating tasks: ALWAYS set needsConfirmation=true — never create silently',
+      '- Respond in the SAME language the human used',
+      '- Be conversational, warm, concise — like a helpful team member, not a robot',
+      '- If unsure what task they mean, ask a clarifying question instead of guessing',
+      '',
+      'Respond ONLY with valid JSON (no markdown wrapper):',
+      '{',
+      '  "reply": "message to send immediately (markdown ok, keep ≤400 chars)",',
+      '  "commands": ["optional command strings"],',
+      '  "needsConfirmation": false,',
+      '  "confirmDescription": "only set when needsConfirmation is true"',
+      '}',
+    ].join('\n');
+
+    interface AnthropicResponse {
+      content: Array<{ type: string; text: string }>;
+    }
+
+    interface MentionResult {
+      reply: string;
+      commands: string[];
+      needsConfirmation?: boolean;
+      confirmDescription?: string;
+    }
+
+    let result: MentionResult = { reply: '', commands: [] };
+
+    try {
+      const res = await fetch(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: `${username}: ${text}` }],
+        }),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.text();
+        await reply(`❌ AI 服务错误 (${res.status}): ${errBody.slice(0, 200)}`);
+        return;
+      }
+
+      const data = await res.json() as AnthropicResponse;
+      const rawText = data.content.find((b) => b.type === 'text')?.text ?? '{}';
+
+      // Strip markdown code fence if present
+      const jsonStr = rawText
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```\s*$/, '')
+        .trim();
+
+      try {
+        result = JSON.parse(jsonStr) as MentionResult;
+      } catch {
+        // Claude returned plain text instead of JSON — treat as reply
+        result = { reply: rawText.slice(0, 400), commands: [] };
+      }
+    } catch (err) {
+      await reply(`❌ 网络错误：${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    // 1. Send immediate reply
+    if (result.reply) {
+      await reply(result.reply);
+    }
+
+    // 2. If confirmation needed, register pending and stop
+    if (result.needsConfirmation) {
+      const desc = result.confirmDescription ?? result.commands.join(', ');
+      setPendingConfirm(channelId, { commands: result.commands ?? [], description: desc, userId });
+      return;
+    }
+
+    // 3. Execute commands
+    for (const cmd of (result.commands ?? [])) {
+      if (cmd.startsWith('/')) {
+        console.log(`\n📨 [Discord AI] executing: ${cmd}`);
+        processLine(cmd);
+      }
+    }
+  };
+
   // ── Stdin (human operator) ───────────────────────────────────────────────
   process.stdin.resume();
   const stdinRl = createInterface({ input: process.stdin });
   stdinRl.on('line', processLine);
 
   // ── Discord bot (optional, bidirectional) ────────────────────────────────
-  initDiscordBot(processLine);
+  initDiscordBot(processLine, handleMention);
 
   // ── Scheduler tick (every 5 s) ───────────────────────────────────────────
   const tick = async (): Promise<void> => {
@@ -624,17 +779,19 @@ const runWorldLoop = async (): Promise<void> => {
 
     // ── Orchestrator assignment turn (only when needed) ───────────────────
     const pendingTasks = await getPendingTasks();
-    const messagesForThisTurn = globalHumanMessages.splice(0);
     const needsAssignment =
       pendingTasks.length > 0 ||
-      messagesForThisTurn.length > 0 ||
+      globalHumanMessages.length > 0 ||
       isFirstRun ||
       signals.some((s) => s.type === 'TASK_ADDED');
 
     if (!needsAssignment) return;
 
     // Skip if an SDK call is already in-flight — runners are unblocked every tick regardless.
+    // Messages are NOT spliced yet so they survive to the next tick instead of being silently dropped.
     if (orchestratorBusy) return;
+
+    const messagesForThisTurn = globalHumanMessages.splice(0);
     orchestratorBusy = true;
 
     // ── Fire-and-forget: orchestrator SDK call must NOT block the tick loop ──

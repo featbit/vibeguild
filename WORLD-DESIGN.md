@@ -674,7 +674,7 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 - World/global events → webhook → `#control-plane`
 - Task-specific events (progress, alignment) → Bot API → forum post thread in `#tasks`
 - If no thread registered for a task yet → falls back to webhook → `#control-plane`
-- @mention interactions → `messageCreate` Gateway event → intent parser → confirmation flow → `commandCallback` in `world.ts` → response via Bot API reply in same channel + webhook for result output
+- @mention interactions → `messageCreate` Gateway event → `onMention` callback → **Claude AI** (Anthropic Messages API, `claude-haiku-4-5`) → structured JSON response (`reply`, `commands`, `needsConfirmation`) → optional confirmation flow → `processLine()` in `world.ts` → response via Bot API reply to same channel
 - Slash command interactions → `interactionCreate` Gateway event → `commandCallback` in `world.ts` → response via webhook to `#control-plane`
 
 ### What gets mirrored
@@ -693,8 +693,13 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 
 ### Implementation
 
-`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`, `sendDirectReply()`, `parseIntent()`
+`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`, `sendDirectReply()`, `setPendingConfirm()`
 Uses `discord.js` for Gateway WebSocket connection, @mention handling (`messageCreate` with `GuildMessages` + `MessageContent` intents), and slash command registration.
-Wired into `src/world.ts`. Slash commands registered to all bot guilds on `ready`. @mention handler with confirmation flow runs in parallel.
+`initDiscordBot(onCommand, onMention)` accepts two callbacks from `world.ts`:
+- `onCommand(line)` — processes slash commands (same as stdin)
+- `onMention(text, username, userId, channelId, reply)` — AI-powered handler implemented in `world.ts` using Claude via Anthropic Messages API
+
+`handleMention` in `world.ts` builds a system prompt with current task data, calls `claude-haiku-4-5`, parses the JSON response, sends an immediate reply, and executes any commands. For task creation it sets a `pendingConfirm` and waits for user yes/no.
+Wired into `src/world.ts`. Slash commands registered to all bot guilds on `ready`.
 
 > **⚠️ Privileged Intent**: `MessageContent` intent must be enabled in the Discord Developer Portal (Bot page → Privileged Gateway Intents) before @mention reading will work.

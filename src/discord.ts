@@ -37,13 +37,13 @@ const FLUSH_INTERVAL_MS = 1_500;
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
 
-type QueuedMessage = { content: string; threadId?: string };
+type QueuedMessage = { content: string; threadId?: string; raw?: boolean };
 const queue: QueuedMessage[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 
-const enqueue = (content: string, threadId?: string): void => {
-  if (!WEBHOOK_URL) return;
-  queue.push({ content, threadId });
+const enqueue = (content: string, threadId?: string, raw = false): void => {
+  if (!WEBHOOK_URL && !BOT_TOKEN) return;
+  queue.push({ content, threadId, raw });
   if (!flushTimer) {
     flushTimer = setInterval(() => { void flush(); }, FLUSH_INTERVAL_MS);
     if (flushTimer.unref) flushTimer.unref();
@@ -54,11 +54,39 @@ const enqueue = (content: string, threadId?: string): void => {
 
 const threadRegistry    = new Map<string, string>();  // taskId  → threadId
 const threadToTaskId    = new Map<string, string>();  // threadId → taskId
+const threadTitles      = new Map<string, string>();  // taskId  → human-readable title
+
+/**
+ * Returns a Discord channel mention string "<#threadId>" for the task,
+ * or null if no thread has been created yet.
+ */
+export const getTaskThreadMention = (taskId: string): string | null => {
+  const threadId = threadRegistry.get(taskId);
+  return threadId ? `<#${threadId}>` : null;
+};
+
+/** Returns all registered task threads as { taskId, short, mention, url, title }. */
+export const getActiveThreadLinks = (): Array<{ taskId: string; short: string; mention: string; url: string | null; title: string }> => {
+  const result: Array<{ taskId: string; short: string; mention: string; url: string | null; title: string }> = [];
+  for (const [taskId, threadId] of threadRegistry) {
+    result.push({
+      taskId,
+      short: taskId.slice(0, 8),
+      mention: `<#${threadId}>`,
+      url: botGuildId ? `https://discord.com/channels/${botGuildId}/${threadId}` : null,
+      title: threadTitles.get(taskId) ?? taskId.slice(0, 8),
+    });
+  }
+  return result;
+};
 
 // ─── Public outbound API ──────────────────────────────────────────────────────
 
-/** Post a line to the main control channel. */
+/** Post a line to the main control channel (code-block formatted). */
 export const notifyDiscord = (line: string): void => enqueue(line);
+
+/** Post a line to the main control channel without code-block wrapping (links stay clickable). */
+export const notifyDiscordRaw = (line: string): void => enqueue(line, undefined, true);
 
 /** Post a line to a task-specific thread (falls back to main channel if no thread yet). */
 export const notifyTask = (taskId: string, line: string): void =>
@@ -81,23 +109,23 @@ export const flushDiscord = async (): Promise<void> => {
 
 const flush = async (): Promise<void> => {
   if (queue.length === 0) return;
-  // Group consecutive entries with the same threadId into one batch.
-  const groups: { threadId?: string; lines: string[] }[] = [];
+  // Group consecutive entries with the same threadId AND same raw flag into one batch.
+  const groups: { threadId?: string; lines: string[]; raw: boolean }[] = [];
   for (const msg of queue.splice(0)) {
     const last = groups[groups.length - 1];
-    if (last && last.threadId === msg.threadId) {
+    if (last && last.threadId === msg.threadId && last.raw === (msg.raw ?? false)) {
       last.lines.push(msg.content);
     } else {
-      groups.push({ threadId: msg.threadId, lines: [msg.content] });
+      groups.push({ threadId: msg.threadId, lines: [msg.content], raw: msg.raw ?? false });
     }
   }
   for (const group of groups) {
     for (const batch of buildBatches(group.lines)) {
       // Task threads live in the forum channel — must use Bot API, not webhook
       if (group.threadId && BOT_TOKEN) {
-        await sendBotMessage(batch, group.threadId);
+        await sendBotMessage(batch, group.threadId, group.raw);
       } else {
-        await sendWebhook(batch);
+        await sendWebhook(batch, group.raw);
       }
     }
   }
@@ -119,25 +147,27 @@ const buildBatches = (lines: string[]): string[] => {
   return batches;
 };
 
-const sendWebhook = async (content: string): Promise<void> => {
+const sendWebhook = async (content: string, raw = false): Promise<void> => {
   if (!WEBHOOK_URL) return;
   try {
+    const body = raw ? content : `\`\`\`\n${content}\n\`\`\``;
     await fetch(WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: `\`\`\`\n${content}\n\`\`\`` }),
+      body: JSON.stringify({ content: body }),
     });
   } catch { /* best-effort */ }
 };
 
 /** Send a message directly to a channel or thread via Bot API. */
-const sendBotMessage = async (content: string, channelId: string): Promise<void> => {
+const sendBotMessage = async (content: string, channelId: string, raw = false): Promise<void> => {
   if (!BOT_TOKEN) return;
   try {
+    const body = raw ? content : `\`\`\`\n${content}\n\`\`\``;
     await fetch(`${DISCORD_API}/channels/${channelId}/messages`, {
       method: 'POST',
       headers: { Authorization: `Bot ${BOT_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: `\`\`\`\n${content}\n\`\`\`` }),
+      body: JSON.stringify({ content: body }),
     });
   } catch { /* best-effort */ }
 };
@@ -200,6 +230,7 @@ export const createTaskThread = async (task: TaskThreadInfo): Promise<void> => {
   const registerThread = (id: string) => {
     threadRegistry.set(task.id, id);
     threadToTaskId.set(id, task.id);
+    threadTitles.set(task.id, deriveThreadTitle(rawText));
   };
 
   // Text channel: PUBLIC_THREAD (type 11)
@@ -258,81 +289,28 @@ export const closeTaskThread = async (taskId: string, status: 'completed' | 'fai
 
 // ─── Conversational @mention handler ────────────────────────────────────────
 
-type ParsedIntent =
-  | { type: 'new_task'; description: string }
-  | { type: 'tasks' }
-  | { type: 'status'; id: string }
-  | { type: 'pause'; id: string; message?: string }
-  | { type: 'msg'; id: string; message: string }
-  | { type: 'done' }
-  | { type: 'help' }
-  | { type: 'unknown'; raw: string };
-
 type PendingConfirm = {
-  intent: 'new_task';
+  commands: string[];
   description: string;
   userId: string;
-  channelId: string;
 };
 
-/** Per-channel pending confirmation state. */
+/** Per-channel pending confirmation state (for destructive/creative actions). */
 const pendingConfirms = new Map<string, PendingConfirm>();
 
-/** Parse human natural-language text into a structured command intent. */
-const parseIntent = (text: string): ParsedIntent => {
-  const t = text.trim();
-  const lower = t.toLowerCase();
+const CONFIRM_YES = /^(yes|y|ok|sure|confirm|go|proceed|yep|yeah|好|是|确认|执行|继续|没问题|可以|同意)/i;
+const CONFIRM_NO  = /^(no|n|cancel|nope|stop|取消|不|算了|不要|不用了)/i;
 
-  // Help
-  if (/^\/?help$/i.test(t) || /^(what can you do|how do i use|commands)/i.test(lower)) {
-    return { type: 'help' };
-  }
-
-  // /done / resume / proceed
-  if (/^\/?done$/i.test(t) || /^(proceed|go ahead|let .* proceed|继续|好的?|执行吧?)/i.test(lower)) {
-    return { type: 'done' };
-  }
-
-  // /tasks / list / show tasks
-  if (/^\/?tasks?$/i.test(t) || /\b(list|show|get|all|查看|列出|显示).{0,20}\btasks?\b/i.test(lower) || /\btasks?\.?$/i.test(lower)) {
-    return { type: 'tasks' };
-  }
-
-  // /status <id> or "status of <id>" or "progress of <id>"
-  const statusMatch = t.match(/(?:\/status|status(?: of)?|progress(?: of)?|进度)\s+([a-f0-9]{4,36})/i);
-  if (statusMatch) return { type: 'status', id: statusMatch[1] };
-
-  // /pause --task <id> [message] or "pause <id>"
-  const pauseMatch = t.match(/(?:\/pause|pause|暂停)\s+(?:--task\s+)?([a-f0-9]{4,36})(?: (.+))?/i);
-  if (pauseMatch) return { type: 'pause', id: pauseMatch[1], message: pauseMatch[2]?.trim() };
-
-  // /msg --task <id> <message> or "message <id>: text"
-  const msgMatch = t.match(/(?:\/msg|msg|message|发消息|send)\s+(?:--task\s+)?([a-f0-9]{4,36})[:：]?\s+(.+)/i);
-  if (msgMatch) return { type: 'msg', id: msgMatch[1], message: msgMatch[2] };
-
-  // new task / create task — keyword prefix then description
-  const newMatch = t.match(/(?:\/new|\/task|(?:new|create|add)\s+task|创建任务|新任务)[:\s]+(.+)/is);
-  if (newMatch) return { type: 'new_task', description: newMatch[1].trim() };
-
-  // Fallback: if message is long (>30 chars) and doesn't match anything, treat as a new task description prompt
-  if (t.length > 30 && !/^[a-f0-9]{4,36}$/i.test(t)) {
-    return { type: 'new_task', description: t };
-  }
-
-  return { type: 'unknown', raw: t };
+/**
+ * Register a pending confirmation for a channel.
+ * Called from world.ts after AI decides action needs user approval.
+ */
+export const setPendingConfirm = (
+  channelId: string,
+  entry: { commands: string[]; description: string; userId: string },
+): void => {
+  pendingConfirms.set(channelId, entry);
 };
-
-const HELP_TEXT = [
-  '👋 **Vibe Guild Bot** — talk to me naturally or use these patterns:',
-  '• `new task: <description>` — create a new world task',
-  '• `list tasks` — show all tasks with status',
-  '• `status <id>` — detailed status for a task',
-  '• `pause <id> [message]` — pause task for alignment',
-  '• `msg <id>: <text>` — inject message into running task',
-  '• `done` — end alignment and let leader proceed',
-  '',
-  'You can also just describe what you want in plain English!',
-].join('\n');
 
 /** Send a plain message to a Discord channel directly via Bot API. */
 const sendDirectReply = async (channelId: string, content: string): Promise<void> => {
@@ -378,14 +356,35 @@ const SLASH_COMMANDS = [
 // ─── Bot: Gateway + slash command handling ────────────────────────────────────
 
 let commandCallback: ((line: string) => void) | null = null;
+let botGuildId = '';  // set on first guild at ready — used for direct thread URLs
+
+/**
+ * Returns a direct Discord URL to a task's thread, or null if not registered.
+ * Format: https://discord.com/channels/{guildId}/{threadId}
+ */
+export const getTaskThreadUrl = (taskId: string): string | null => {
+  const threadId = threadRegistry.get(taskId);
+  if (!threadId || !botGuildId) return null;
+  return `https://discord.com/channels/${botGuildId}/${threadId}`;
+};
+
+/** Callback type for AI-powered natural-language @mention processing. */
+export type OnMentionFn = (
+  text: string,
+  username: string,
+  userId: string,
+  channelId: string,
+  reply: (msg: string) => Promise<void>,
+) => Promise<void>;
 
 /**
  * Start discord.js Gateway connection for slash command interactions.
  * Registers slash commands to all guilds on ready.
  * onCommand is called with the reconstructed raw command string (same format as stdin).
+ * onMention is called when someone @mentions the bot — implement with Claude AI in world.ts.
  * No-op when BOT_TOKEN is unset.
  */
-export const initDiscordBot = (onCommand: (line: string) => void): void => {
+export const initDiscordBot = (onCommand: (line: string) => void, onMention?: OnMentionFn): void => {
   if (!BOT_TOKEN) return;
   commandCallback = onCommand;
 
@@ -399,6 +398,8 @@ export const initDiscordBot = (onCommand: (line: string) => void): void => {
 
   client.once('ready', async (c) => {
     console.log(`\n🤖 [Discord] Bot active — logged in as ${c.user.tag}\n`);
+    // Capture first guild ID for constructing direct thread URLs
+    botGuildId = c.guilds.cache.first()?.id ?? '';
 
     // Register slash commands as guild commands (instant, no 1-hour global delay)
     const rest = new REST().setToken(BOT_TOKEN);
@@ -414,7 +415,7 @@ export const initDiscordBot = (onCommand: (line: string) => void): void => {
     notifyDiscord(
       `🤖 Discord bot active\n` +
       `  Slash commands: /new  /tasks  /status  /pause  /msg  /done\n` +
-      `  Or just @mention me in this channel with plain English!`,
+      `  Or just @mention me — I understand natural language (EN/ZH)!`,
     );
   });
 
@@ -426,6 +427,7 @@ export const initDiscordBot = (onCommand: (line: string) => void): void => {
     if (!message.mentions.has(client.user.id)) return;
 
     const username = message.author.displayName ?? message.author.username;
+    const userId = message.author.id;
     const channelId = message.channelId;
 
     // Strip the @mention and clean up whitespace
@@ -434,107 +436,49 @@ export const initDiscordBot = (onCommand: (line: string) => void): void => {
       .replace(/\s+/g, ' ')
       .trim();
 
+    const reply = (content: string): Promise<void> => sendDirectReply(channelId, content);
+
     // ── Check for pending confirmation in this channel ────────────────────
     const pending = pendingConfirms.get(channelId);
-    if (pending && pending.userId === message.author.id) {
-      const isYes = /^(yes|y|ok|sure|confirm|go|proceed|yep|yeah|好|是|确认|执行|继续)/i.test(raw);
-      const isNo  = /^(no|n|cancel|nope|stop|取消|不|算了)/i.test(raw);
-
-      if (isYes) {
+    if (pending && pending.userId === userId) {
+      if (CONFIRM_YES.test(raw)) {
         pendingConfirms.delete(channelId);
-        if (pending.intent === 'new_task') {
-          await sendDirectReply(channelId, `✅ Creating task...`);
-          console.log(`\n📨 [Discord] @mention new task from ${username}`);
-          notifyDiscord(`📨 [${username}] new task (via @mention)\n${'─'.repeat(42)}\n${pending.description.slice(0, 800)}`);
-          commandCallback?.(`/task ${pending.description}`);
+        await reply(`✅ 正在执行…`);
+        for (const cmd of pending.commands) {
+          commandCallback?.(cmd);
         }
         return;
       }
-      if (isNo) {
+      if (CONFIRM_NO.test(raw)) {
         pendingConfirms.delete(channelId);
-        await sendDirectReply(channelId, `❌ Cancelled. Let me know if you need anything else.`);
+        await reply(`❌ 已取消。还有什么需要帮忙的吗？`);
         return;
       }
-      // If neither yes/no, fall through to re-parse as a fresh command
+      // Not yes/no — fall through to re-process as fresh message
       pendingConfirms.delete(channelId);
     }
 
     if (!raw) {
-      await sendDirectReply(channelId, HELP_TEXT);
+      await reply(`👋 你好！我是 Vibe Guild 助手，直接说中文就行，我都能理解！`);
       return;
     }
 
-    const intent = parseIntent(raw);
-    console.log(`\n📨 [Discord] @mention from ${username}: ${intent.type}`);
+    console.log(`\n📨 [Discord] @mention from ${username}: "${raw.slice(0, 80)}"`);
 
-    switch (intent.type) {
-      case 'help': {
-        await sendDirectReply(channelId, HELP_TEXT);
-        break;
-      }
-
-      case 'new_task': {
-        // Ask for confirmation before creating
-        const preview = intent.description.slice(0, 600);
-        pendingConfirms.set(channelId, {
-          intent: 'new_task',
-          description: intent.description,
-          userId: message.author.id,
-          channelId,
-        });
-        await sendDirectReply(
-          channelId,
-          `📋 Got it. I'll create the following task:\n\`\`\`\n${preview}${intent.description.length > 600 ? '\n…(truncated)' : ''}\n\`\`\`\nShall I proceed? (yes / no)`,
-        );
-        break;
-      }
-
-      case 'tasks': {
-        await sendDirectReply(channelId, '📋 Fetching task list…');
-        notifyDiscord(`📨 [${username}] tasks (via @mention)`);
-        commandCallback?.('/tasks');
-        break;
-      }
-
-      case 'status': {
-        await sendDirectReply(channelId, `🔍 Fetching status for \`${intent.id}\`…`);
-        notifyDiscord(`📨 [${username}] status ${intent.id} (via @mention)`);
-        commandCallback?.(`/status ${intent.id}`);
-        break;
-      }
-
-      case 'pause': {
-        const line = intent.message
-          ? `/pause --task ${intent.id} ${intent.message}`
-          : `/pause --task ${intent.id}`;
-        await sendDirectReply(channelId, `⏸ Requesting alignment with task \`${intent.id}\`…`);
-        notifyDiscord(`📨 [${username}] pause ${intent.id}${intent.message ? ` — "${intent.message}"` : ''} (via @mention)`);
-        commandCallback?.(line);
-        break;
-      }
-
-      case 'msg': {
-        await sendDirectReply(channelId, `💬 Sending message to task \`${intent.id}\`…`);
-        notifyDiscord(`📨 [${username}] msg ${intent.id}: ${intent.message.slice(0, 200)} (via @mention)`);
-        commandCallback?.(`/msg --task ${intent.id} ${intent.message}`);
-        break;
-      }
-
-      case 'done': {
-        await sendDirectReply(channelId, `▶️ Ending alignment — letting the leader proceed independently.`);
-        notifyDiscord(`📨 [${username}] done (via @mention)`);
-        commandCallback?.('/done');
-        break;
-      }
-
-      default: {
-        // Unknown intent
-        await sendDirectReply(
-          channelId,
-          `🤔 I couldn't figure out what you mean by \`${(intent as { raw: string }).raw.slice(0, 100)}\`.\n\n${HELP_TEXT}`,
-        );
-      }
+    if (!onMention) {
+      await reply(`⚠️ 对话功能未初始化，请稍后再试。`);
+      return;
     }
+
+    // Send immediate "thinking" indicator before slow AI call
+    await reply('🤔 思考中…').catch(() => undefined);
+
+    // Delegate entirely to AI handler in world.ts
+    // The handler may call commandCallback internally AND also call reply()
+    await onMention(raw, username, userId, channelId, reply).catch(async (err) => {
+      console.error('[Discord] onMention error:', err);
+      await reply(`❌ 出了点问题：${err instanceof Error ? err.message : String(err)}`);
+    });
   });
 
   client.on('interactionCreate', async (interaction) => {
