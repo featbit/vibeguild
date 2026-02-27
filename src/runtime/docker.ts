@@ -64,7 +64,6 @@ const waitForContainer = (id: string): Promise<number> =>
 
 export const createDockerSandboxAdapter = (
   taskId: string,
-  leaderId: string,
   opts: AdapterOptions = {},
 ): RuntimeAdapter => {
   const cfg = loadRuntimeConfig();
@@ -156,19 +155,12 @@ export const createDockerSandboxAdapter = (
       await mkdir(logsDir, { recursive: true });
       await mkdir(claudeHomeDir, { recursive: true });
       await mkdir(taskOutputDir, { recursive: true });
-      await logRuntime(`Task runner starting (leader=${leaderId}, mode=docker)`);
+      await logRuntime(`Task runner starting (mode=docker)`);
 
       const containerName = `vibeguild-${taskId.slice(0, 8)}`;
-      const beingsRoot = join(wPath, 'beings');
       const sharedDir = join(wPath, 'shared');
-      const assignedBeings = task.assignedTo ?? [leaderId];
 
       await mkdir(sharedDir, { recursive: true });
-      await Promise.all(assignedBeings.map((id) => mkdir(join(beingsRoot, id), { recursive: true })));
-
-      const beingMounts = assignedBeings.flatMap((id) => [
-        '-v', `${beingsRoot}/${id}:/workspace/world/beings/${id}`,
-      ]);
 
       const dockerArgs = [
         '--name', containerName,
@@ -179,19 +171,15 @@ export const createDockerSandboxAdapter = (
         '-v', `${join(wPath, 'shared')}:/workspace/world/shared:ro`,
         '-v', `${taskDir}:/workspace/world/tasks/${taskId}`,
         '-v', `${claudeHomeDir}:/home/sandbox/.claude`,
-        ...beingMounts,
         '-v', `${taskOutputDir}:/workspace/output`,
         '-w', '/workspace',
         '-e', `TASK_ID=${task.id}`,
         '-e', `TASK_TITLE=${encodeURIComponent(task.title)}`,
         '-e', `TASK_DESCRIPTION=${encodeURIComponent(task.description)}`,
-        '-e', `LEADER_ID=${leaderId}`,
-        '-e', `ASSIGNED_TO=${task.assignedTo?.join(',') ?? leaderId}`,
         '-e', `ANTHROPIC_API_KEY=${cfg.anthropicApiKey}`,
         ...(cfg.anthropicBaseUrl ? ['-e', `ANTHROPIC_BASE_URL=${cfg.anthropicBaseUrl}`] : []),
         ...(cfg.anthropicModel ? ['-e', `ANTHROPIC_MODEL=${cfg.anthropicModel}`] : []),
         '-e', `EXECUTION_MODE=${cfg.executionMode}`,
-        '-e', `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
         '-e', `VIBEGUILD_GITHUB_TOKEN=${cfg.githubToken}`,
         '-e', `VIBEGUILD_GITHUB_ORG=${cfg.githubOrg}`,
         '-e', `HOME=/home/sandbox`,
@@ -200,7 +188,7 @@ export const createDockerSandboxAdapter = (
         'node', '/workspace/src/sandbox/entrypoint.mjs',
       ];
 
-      await updateTaskStatus(taskId, 'in-progress', task.assignedTo);
+      await updateTaskStatus(taskId, 'in-progress');
       await execAsync(`docker rm -f ${containerName}`).catch(() => undefined);
 
       ctx.containerId = await dockerRunDetached(dockerArgs);

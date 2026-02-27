@@ -13,7 +13,7 @@ export type AdapterState = 'idle' | 'running' | 'paused' | 'completed' | 'failed
 /** Minimum progress snapshot the sandbox must sync into world/tasks/{id}/progress.json */
 export type SyncedProgress = {
   taskId: string;
-  leaderId: string;
+  leaderId?: string;  // legacy field — no longer required
   worldDay: number;
   reportedAt: string;
   /**

@@ -10,8 +10,6 @@
  *   TASK_ID              — world task UUID
  *   TASK_TITLE           — URI-encoded task title
  *   TASK_DESCRIPTION     — URI-encoded task description
- *   LEADER_ID            — being ID leading this task
- *   ASSIGNED_TO          — comma-separated list of all beings
  *   ANTHROPIC_API_KEY    — required for claude CLI
  *   VIBEGUILD_GITHUB_TOKEN  — required in docker mode; task repo creation/push
  *
@@ -26,8 +24,6 @@ import { getMcpServers } from './mcp-servers.mjs';
 const TASK_ID = process.env['TASK_ID'] ?? '';
 const TASK_TITLE = decodeURIComponent(process.env['TASK_TITLE'] ?? 'Untitled task');
 const TASK_DESCRIPTION = decodeURIComponent(process.env['TASK_DESCRIPTION'] ?? '');
-const LEADER_ID = process.env['LEADER_ID'] ?? 'leader';
-const ASSIGNED_TO = (process.env['ASSIGNED_TO'] ?? LEADER_ID).split(',').map(s => s.trim()).filter(Boolean);
 const GITHUB_TOKEN = process.env['VIBEGUILD_GITHUB_TOKEN'] ?? '';
 const GITHUB_OWNER = process.env['VIBEGUILD_GITHUB_ORG'] ?? 'vibeguild';
 let SANDBOX_REPO_URL = '';
@@ -219,9 +215,8 @@ const initRepoReadme = async (owner, repo) => {
     `---`,
     ``,
     `- **Task ID:** \`${TASK_ID}\``,
-    `- **Leader:** ${LEADER_ID}`,
-    `- **Team:** ${ASSIGNED_TO.join(', ')}`,
     `- **Started:** ${new Date().toISOString()}`,
+
   ].join('\n');
 
   const encoded = Buffer.from(readmeContent, 'utf-8').toString('base64');
@@ -349,7 +344,6 @@ const writeProgress = async (status, summary, percent, extra = {}) => {
   const payload = {
     ...(current && typeof current === 'object' ? current : {}),
     taskId: TASK_ID,
-    leaderId: LEADER_ID,
     worldDay,
     reportedAt: new Date().toISOString(),
     status,
@@ -405,11 +399,8 @@ const drainInbox = async () => {
 // ─── prompt ───────────────────────────────────────────────────────────────────
 
 const buildPrompt = () => {
-  const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
-  const teamList = ASSIGNED_TO.join(', ');
   const lines = [
-    `You are ${LEADER_ID}, team leader for a Vibe Guild world task running in a Docker sandbox.`,
-    `Your full team: ${teamList}`,
+    `You are an autonomous agent executing a world task in a Docker sandbox.`,
     ``,
     `**Task:** ${TASK_TITLE}`,
     `**Task ID:** ${TASK_ID}`,
@@ -417,15 +408,15 @@ const buildPrompt = () => {
     `## Task description`,
     TASK_DESCRIPTION,
     ``,
-    `## Your responsibilities (execute in order)`,
+    `## Your responsibilities`,
     ``,
     `### Phase 1 — Execute the task`,
     `1. Execute this task fully and autonomously.`,
     `2. Write progress.json at EVERY significant step (not just start/end):`,
     `   File: world/tasks/${TASK_ID}/progress.json`,
-    `   Schema: { taskId, leaderId, worldDay (read from world/memory/world.json), reportedAt,`,
+    `   Schema: { taskId, worldDay (read from world/memory/world.json), reportedAt,`,
     `             status ("in-progress"|"completed"|"failed"|"waiting_for_human"), summary,`,
-    `             percentComplete (0-100), checkpoints: [{time, message}], artifacts?: {},`,
+    `             percentComplete (0-100), checkpoints: [{at, description}], artifacts?: {},`,
     `             question?: string (only when status is "waiting_for_human") }`,
     `   IMPORTANT: Update progress.json after each meaningful action so the human operator`,
     `   can monitor your progress in real-time. Aim for an update every 2-5 tool calls.`,
@@ -450,36 +441,6 @@ const buildPrompt = () => {
     `- Minor stylistic or implementation choices — use your judgment.`,
     `- Anything that you can reasonably infer from the task description.`,
     `- Questions you could answer yourself with a bit of research.`,
-    ``,
-    `### Phase 2 — Post-task memory (REQUIRED after Phase 1 completes)`,
-    `For EVERY being in the team [${teamList}], do the following:`,
-    ``,
-    `**A. Write a self-note for each being:**`,
-    `   File: world/beings/{being-id}/memory/self-notes/${ts}.json`,
-    `   Create the directory with mkdir if it doesn't exist.`,
-    `   Schema:`,
-    `   {`,
-    `     "timestamp": "${ts}",`,
-    `     "taskId": "${TASK_ID}",`,
-    `     "title": "<short title for this task>",`,
-    `     "role": "<what this being contributed to the task>",`,
-    `     "summary": "<what was accomplished>",`,
-    `     "keyDecisions": ["<decision 1>", ...],`,
-    `     "learnings": ["<thing learned 1>", ...],`,
-    `     "followUps": ["<future action 1>", ...]`,
-    `   }`,
-    ``,
-    `**B. Update profile.json for each being:**`,
-    `   File: world/beings/{being-id}/profile.json`,
-    `   Read the existing profile, then:`,
-    `   - Add any new skills demonstrated in this task to the "skills" array (avoid duplicates)`,
-    `   - Update "status" to "idle"`,
-    `   - Add a "lastTaskId" field with value "${TASK_ID}"`,
-    `   - Add a "lastTaskAt" field with the current ISO timestamp`,
-    `   Write the updated profile back.`,
-    ``,
-    `Note: You are the leader so you write on behalf of all beings. Each being has a different`,
-    `perspective — tailor their self-note to match their role in the task.`,
   ];
 
   if (SANDBOX_REPO_URL) {
@@ -514,40 +475,6 @@ const buildPrompt = () => {
     );
   }
 
-  return lines.join('\n');
-};
-
-// ─── v2 subagent prompt ────────────────────────────────────────────────────────
-
-const buildV2Prompt = () => {
-  const base = buildPrompt();
-  const members = ASSIGNED_TO.filter((id) => id !== LEADER_ID);
-  const ts = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
-  const lines = [
-    base,
-    ``,
-    `## Execution Model: v2 — Leader + Subagents`,
-    ``,
-    `You are ${LEADER_ID}, the team leader. For this task you MUST use Claude's built-in`,
-    `\`Task\` tool to spawn each team member as an independent subagent.`,
-    `Each subagent runs as a real separate AI process that shares this container's filesystem.`,
-    ``,
-    `Team members to spawn: ${members.length > 0 ? members.join(', ') : '(solo task — no subagents needed)'}`,
-    ``,
-    `### Spawning pattern`,
-    `Use the Task tool with a prompt like:`,
-    `  "You are {member}. You are working on Vibe Guild task ${TASK_ID}: ${TASK_TITLE}.`,
-    `   Your role: [describe their specific contribution].`,
-    `   The workspace is at /workspace. Write your deliverables there.`,
-    `   Your being directory: world/beings/{member}/.`,
-    `   When done, write your self-note to world/beings/{member}/memory/self-notes/${ts}.json`,
-    `   and update world/beings/{member}/profile.json (set status to idle, lastTaskId=${TASK_ID})."`,
-    ``,
-    `You may spawn subagents sequentially (if they depend on each other's output) or`,
-    `concurrently (if they work independently). Use your judgment.`,
-    ``,
-    `Continue to write progress.json yourself after each significant milestone.`,
-  ];
   return lines.join('\n');
 };
 
@@ -631,12 +558,12 @@ const runClaudeInterruptible = async (prompt, mcpConfigPath = null, allowMcpSile
 
   proc.stdout?.on('data', (/** @type {Buffer} */ d) => {
     const text = d.toString();
-    process.stdout.write(`[${LEADER_ID}] ${text}`);
+    process.stdout.write(`[sandbox] ${text}`);
     void appendClaudeLog('stdout', text.trimEnd()).catch(() => undefined);
   });
   proc.stderr?.on('data', (/** @type {Buffer} */ d) => {
     const text = d.toString();
-    process.stderr.write(`[${LEADER_ID}:err] ${text}`);
+    process.stderr.write(`[sandbox:err] ${text}`);
     void appendClaudeLog('stderr', text.trimEnd()).catch(() => undefined);
   });
 
@@ -755,7 +682,7 @@ const waitForInboxResponse = async (timeoutMs) => {
  * @returns {string}
  */
 const buildResumePrompt = (humanAnswer, prevProgress, history) => {
-  const base = EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt();
+  const base = buildPrompt();
   const historyLines = history.length > 1
     ? [
         ``,
@@ -794,8 +721,6 @@ const buildResumePrompt = (humanAnswer, prevProgress, history) => {
 
 // ─── main ─────────────────────────────────────────────────────────────────────
 
-const EXECUTION_MODE = process.env['EXECUTION_MODE'] ?? 'v1';
-
 /**
  * Max alignment rounds as a safety brake (not a UX limit).
  * Each round = operator sends one or more messages, leader processes and either
@@ -819,7 +744,7 @@ const run = async () => {
     process.exit(1);
   }
 
-  console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE} (mode: ${EXECUTION_MODE})`);
+  console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE}`);
   try {
     await resolveSandboxRepo();
   } catch (err) {
@@ -839,7 +764,7 @@ const run = async () => {
 
   // Check for any messages already in inbox before launching claude
   const initialMsgs = await drainInbox();
-  const basePrompt = EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt();
+  const basePrompt = buildPrompt();
   const firstPrompt = initialMsgs.length > 0
     ? `${basePrompt}\n\n--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
     : basePrompt;
@@ -991,7 +916,7 @@ const run = async () => {
     let recovered = false;
     for (let attempt = 1; attempt <= MAX_NOOP_RETRY; attempt++) {
       const remediationPrompt = [
-        EXECUTION_MODE === 'v2' ? buildV2Prompt() : buildPrompt(),
+        buildPrompt(),
         '',
         '--- REMEDIATION ---',
         'Your previous run exited without meaningful progress evidence.',

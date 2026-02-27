@@ -9,9 +9,9 @@ export type TaskStatus =
 
 export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
 
-export type TaskCreator = 'human' | 'orchestrator' | 'being';
+export type TaskCreator = 'human' | 'orchestrator';
 
-export type TaskType = 'work' | 'discussion' | 'rest' | 'meetup';
+export type TaskType = 'work' | 'meetup';
 
 export type Task = {
   id: string;
@@ -19,13 +19,9 @@ export type Task = {
   description: string;
   status: TaskStatus;
   type: TaskType;
-  leaderId?: string;             // being responsible for coordination + progress reports
-  assignedTo?: string[];         // all beings on this task (includes leader)
-  teamId?: string;
   parentId?: string;
   dependencies: string[];
   requiresPlanApproval: boolean;
-  maxBeings?: number;
   priority: TaskPriority;
   createdBy: TaskCreator;
   createdAt: string;

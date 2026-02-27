@@ -24,7 +24,6 @@ export type RunnerOptions = AdapterOptions;
 
 export type WorldTaskRunner = {
   readonly taskId: string;
-  readonly leaderId: string;
   readonly isPaused: boolean;
   readonly isRunning: boolean;
   readonly isFinished: boolean;
@@ -41,16 +40,14 @@ export type WorldTaskRunner = {
 
 export const createTaskRunner = (task: Task, opts: RunnerOptions = {}): WorldTaskRunner => {
   const cfg = loadRuntimeConfig();
-  const leaderId = task.leaderId ?? task.assignedTo?.[0] ?? 'orchestrator';
 
   const adapter =
     cfg.mode === 'docker'
-      ? createDockerSandboxAdapter(task.id, leaderId, opts)
-      : createLocalAdapter(task.id, leaderId, opts);
+      ? createDockerSandboxAdapter(task.id, opts)
+      : createLocalAdapter(task.id, opts);
 
   return {
     taskId: task.id,
-    leaderId,
 
     get isPaused()  { return adapter.state === 'paused'; },
     get isRunning() { return adapter.state === 'running'; },

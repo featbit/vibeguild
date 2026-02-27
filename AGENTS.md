@@ -2,11 +2,10 @@
 applyTo: "**"
 ---
 
-# Vibe Guild — Agent Instructions
+# LP;HU — Agent Instructions
 
-This file applies to **all agents**: GitHub Copilot (creator assistant) and Claude CLI beings
-(world inhabitants running inside sandbox runtimes). Shared foundation; role-specific sections
-are clearly labeled.
+This file applies to **all agents**: GitHub Copilot (operator assistant) and Claude CLI agents
+(running inside sandbox containers). Shared foundation.
 
 ---
 
@@ -26,7 +25,7 @@ Everytime you finished a change, you should also at least update WORLD-DESIGN.md
 
 ---
 
-## For World Beings (Claude CLI inside sandbox)
+## For Sandbox Agents (Claude CLI inside Docker container)
 
 ### Output storage
 
@@ -60,7 +59,7 @@ sessions, task continuations, and resumes recover prior work.
 
 ### Copilot Operational Guidance
 
-When the human asks for world runtime visibility (task queue, progress, escalations, status),
+When the operator asks about task queue, progress, escalations, or status,
 prefer the `vg` CLI first, then summarize the result.
 
 Preferred commands:
@@ -77,13 +76,13 @@ Fallback policy:
 
 1. Try `scripts/vg.mjs` first for low-token, operator-friendly output
 2. Only read raw files under `world/` when CLI output is insufficient
-3. Keep summaries concise and action-oriented for the creator
+3. Keep summaries concise and action-oriented for the operator
 
 ---
 
-## Operator Workflow (for Copilot — guide the creator through these steps)
+## Operator Workflow (for Copilot)
 
-### Starting the world
+### Starting
 
 ```sh
 npm start
@@ -125,20 +124,20 @@ Wait for `📋 Task added: <uuid>` and then `🚀 [World] Starting runner` befor
 3. Within ~2 seconds the container's Claude process is killed via `pause.signal` + SIGTERM
    (no LLM cooperation needed). You'll see:
    ```
-   📍 [leader→<id>] … — Paused by creator for alignment
-   🤔 [leader→<id>] Leader needs your input:
+   📍 [task:<id>] … — Paused for alignment
+   🤔 [task:<id>] Agent needs your input:
       "<context from pause message>"
-      ► Type your reply (press Enter to send). Type /done to let leader proceed independently.
+      ► Type your reply (press Enter to send). Type /done to let the agent proceed independently.
    ```
 4. Type messages directly — no prefix. Each message is sent to the task inbox and Claude is
    re-launched with the full conversation history.
-5. Blake/Casey will **always** acknowledge first (write `waiting_for_human` with their
-   understanding + plan), then ask "Shall I proceed?". You'll see their reply as:
+5. The agent will **always** acknowledge first (write `waiting_for_human` with its
+   understanding + plan), then ask "Shall I proceed?". You'll see its reply as:
    ```
-   💬 [leader] <acknowledgment + updated plan>
+   💬 [task:<id>] <acknowledgment + updated plan>
       ► Your reply:
    ```
-6. Reply to refine further, or type `/done` to let the leader proceed independently.
+6. Reply to refine further, or type `/done` to let the agent proceed independently.
 
 ### Common mistakes to avoid
 
@@ -148,4 +147,4 @@ Wait for `📋 Task added: <uuid>` and then `🚀 [World] Starting runner` befor
 - If alignment resolves immediately without a `🤔` prompt, it means the previous Claude process
   had already written `in-progress` before the signal arrived. Just issue `/pause --task` again
   on the same task — it re-enters alignment mode.
-- `/done` ends alignment and tells the leader to proceed on its own judgment.
+- `/done` ends alignment and tells the agent to proceed on its own judgment.

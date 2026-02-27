@@ -12,7 +12,6 @@ import type { AdapterOptions, AdapterState, RuntimeAdapter } from './adapter.js'
 
 export const createLocalAdapter = (
   taskId: string,
-  leaderId: string,
   opts: AdapterOptions = {},
 ): RuntimeAdapter => {
   let state: AdapterState = 'idle';
@@ -28,58 +27,31 @@ export const createLocalAdapter = (
 
     if (!isResume) {
       lines.push(
-        `You are the Orchestrator running a SINGLE focused task.`,
+        `You are an autonomous agent executing a world task.`,
         ``,
         `**Task:** ${task.title}`,
         `**Task ID:** ${task.id}`,
-        `**Leader:** ${leaderId} — this being leads the team and owns all progress reporting.`,
-        `**Team:** ${task.assignedTo?.join(', ') ?? leaderId}`,
-        ``,
-        `## Instructions`,
-        `1. Use the Task tool to spawn **${leaderId}** as leader with ALL of the following instructions:`,
-        ``,
-        `   ### Leader responsibilities`,
-        `   - Coordinate the team. Spawn other team members in parallel as needed.`,
-        `   - You decide WHEN to write a progress report — trust your own judgment on meaningful`,
-        `     checkpoints. But every time you do report, FIRST read \`world/memory/world.json\``,
-        `     to get the current \`dayCount\`, then write \`world/tasks/${task.id}/progress.json\`:`,
-        `     {`,
-        `       "taskId": "${task.id}",`,
-        `       "leaderId": "${leaderId}",`,
-        `       "worldDay": <dayCount from world.json>,`,
-        `       "reportedAt": "<ISO timestamp>",`,
-        `       "status": "in-progress",`,
-        `       "summary": "...",`,
-        `       "percentComplete": 0-100,`,
-        `       "checkpoints": [{ "at": "<ISO>", "sessionId": "<current>", "description": "..." }]`,
-        `     }`,
-        `   - When the task is fully done: write a final progress.json with status "completed",`,
-        `     then update world/tasks/queue.json to mark this task "completed".`,
-        ``,
-        `   ### Instructions to pass to each team member when you spawn them`,
-        `   Tell every non-leader being you spawn:`,
-        `   "When you finish your assigned node or subtask, write a self-summary to`,
-        `    \`world/beings/{YOUR_BEING_ID}/memory/self-notes/<ISO-timestamp>.json\``,
-        `    with: what you did, key decisions you made, what you learned, anything worth remembering.`,
-        `    Format is free — write what is genuinely useful to your future self."`,
-        ``,
-        `2. MAX BEINGS: ${task.maxBeings ?? 'unlimited'} — this is the total number of distinct beings`,
-        `   you may use across the entire task (including yourself as leader).`,
-        `   Do not spawn more unique beings than this limit, even across multiple rounds.`,
         ``,
         `## Task description`,
         task.description,
+        ``,
+        `## Your responsibilities`,
+        `1. Execute this task fully and autonomously.`,
+        `2. Write progress.json at every significant step:`,
+        `   File: world/tasks/${task.id}/progress.json`,
+        `   Schema: { taskId, worldDay (read from world/memory/world.json), reportedAt,`,
+        `             status ("in-progress"|"completed"|"failed"|"waiting_for_human"), summary,`,
+        `             percentComplete (0-100), checkpoints: [{at, description}] }`,
+        `3. Poll for human instructions: world/tasks/${task.id}/inbox.json`,
+        `4. When done: write status "completed" (or "failed").`,
       );
     } else {
       lines.push(
-        `You are the Orchestrator resuming a task after a rest or interruption.`,
+        `You are resuming a world task after a rest or interruption.`,
         ``,
         `**Task:** ${task.title} (ID: ${task.id.slice(0, 8)})`,
-        `**Leader:** ${leaderId}`,
         ``,
-        `Spawn **${leaderId}** again and tell them:`,
-        `  "Read world/tasks/${task.id}/progress.json — find the latest checkpoint and continue from there."`,
-        `  "Your team: ${task.assignedTo?.join(', ') ?? leaderId}. Resume where you left off."`,
+        `Read world/tasks/${task.id}/progress.json to find the latest checkpoint and continue.`,
       );
     }
 
@@ -88,10 +60,7 @@ export const createLocalAdapter = (
       for (const m of msgs) lines.push(`> ${m}`);
       lines.push(
         `---`,
-        `Before resuming work, pass this message to ${leaderId} and have them:`,
-        `  1. Write a checkpoint to progress.json capturing the current state.`,
-        `  2. Acknowledge the human's guidance.`,
-        `  3. Adjust direction if instructed, then continue.`,
+        `Acknowledge the human's guidance, adjust direction if instructed, then continue.`,
       );
     }
 
@@ -121,7 +90,7 @@ export const createLocalAdapter = (
     options['abortController'] = abortCtrl;
 
     try {
-      await updateTaskStatus(taskId, 'in-progress', task.assignedTo);
+      await updateTaskStatus(taskId, 'in-progress');
 
       for await (const msg of query({
         prompt,
@@ -137,7 +106,7 @@ export const createLocalAdapter = (
         if (m['type'] === 'assistant' && Array.isArray(m['content'])) {
           for (const block of m['content'] as Array<Record<string, unknown>>) {
             if (block['type'] === 'text' && block['text']) {
-              process.stdout.write(`\n[${leaderId}@${taskId.slice(0, 8)}] ${block['text'] as string}\n`);
+              process.stdout.write(`\n[agent@${taskId.slice(0, 8)}] ${block['text'] as string}\n`);
             }
           }
         }

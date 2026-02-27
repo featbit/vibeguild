@@ -1,12 +1,9 @@
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
   WorldState,
   DailyRecord,
-  ShiftSummary,
-  BeingProfile,
-  TeamRecord,
   WorldSignal,
   Escalation,
 } from './types.js';
@@ -19,13 +16,6 @@ const paths = {
   signals: join(ROOT, 'signals.json'),
   runtimeState: join(ROOT, 'sessions', 'runtime.json'),
   daily: (date: string) => join(ROOT, 'memory', 'daily', `${date}.json`),
-  team: (teamId: string) => join(ROOT, 'memory', 'team', `${teamId}.json`),
-  shiftSummary: (beingId: string, timestamp: string) =>
-    join(ROOT, 'beings', beingId, 'memory', 'shifts', `${timestamp}.json`),
-  beingShiftsDir: (beingId: string) =>
-    join(ROOT, 'beings', beingId, 'memory', 'shifts'),
-  beingProfile: (beingId: string) =>
-    join(ROOT, 'beings', beingId, 'profile.json'),
   escalations: join(ROOT, 'reports', 'escalations.json'),
   taskProgress: (taskId: string) =>
     join(ROOT, 'tasks', taskId, 'progress.json'),
@@ -148,91 +138,6 @@ export const writeDailyRecord = async (record: DailyRecord): Promise<void> => {
 export const readDailyRecord = (date: string): Promise<DailyRecord | null> =>
   readJson<DailyRecord | null>(paths.daily(date), null);
 
-// --- Being Profiles ---
-
-export const readBeingProfile = (beingId: string): Promise<BeingProfile | null> =>
-  readJson<BeingProfile | null>(paths.beingProfile(beingId), null);
-
-export const writeBeingProfile = (
-  beingId: string,
-  profile: BeingProfile,
-): Promise<void> => writeJson(paths.beingProfile(beingId), profile);
-
-export const updateBeingStatus = async (
-  beingId: string,
-  status: BeingProfile['status'],
-  currentTaskId?: string,
-): Promise<void> => {
-  const profile = await readBeingProfile(beingId);
-  if (!profile) return;
-  await writeBeingProfile(beingId, {
-    ...profile,
-    status,
-    currentTaskId,
-    lastShiftAt: new Date().toISOString(),
-  });
-};
-
-// --- Shift Summaries ---
-
-export const writeShiftSummary = (summary: ShiftSummary): Promise<void> =>
-  writeJson(paths.shiftSummary(summary.beingId, summary.timestamp), summary);
-
-// --- Being shift helpers ---
-
-/**
- * Return the filenames of shift summaries for a given being that were written
- * on the given date (YYYY-MM-DD). Files are named with a timestamp prefix.
- */
-export const listBeings = async (): Promise<string[]> => {
-  try {
-    const beingsDir = join(ROOT, 'beings');
-    const entries = await readdir(beingsDir, { withFileTypes: true });
-    return entries
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name);
-  } catch {
-    return [];
-  }
-};
-
-/**
- * Scaffold the directory structure for a new being.
- * Creates: memory/shifts/, memory/self-notes/, skills/, tools/
- * The caller is responsible for writing profile.json and .claude/agents/{id}.md
- */
-export const createBeingDirectories = async (beingId: string): Promise<void> => {
-  const base = join(ROOT, 'beings', beingId);
-  await Promise.all([
-    mkdir(join(base, 'memory', 'shifts'), { recursive: true }),
-    mkdir(join(base, 'memory', 'self-notes'), { recursive: true }),
-    mkdir(join(base, 'skills'), { recursive: true }),
-    mkdir(join(base, 'tools'), { recursive: true }),
-  ]);
-};
-
-export const listTodayShifts = async (beingId: string, date: string): Promise<string[]> => {
-  try {
-    const dir = paths.beingShiftsDir(beingId);
-    const files = await readdir(dir);
-    // Match files whose name starts with the date (YYYYMMDD) or contains it
-    const dateCompact = date.replace(/-/g, '');
-    return files.filter((f) => f.startsWith(dateCompact) || f.includes(date));
-  } catch {
-    return [];
-  }
-};
-
-// --- Team Records ---
-
-export const readTeamRecord = (teamId: string): Promise<TeamRecord | null> =>
-  readJson<TeamRecord | null>(paths.team(teamId), null);
-
-export const writeTeamRecord = (
-  teamId: string,
-  record: TeamRecord,
-): Promise<void> => writeJson(paths.team(teamId), record);
-
 // --- Task Progress ---
 
 export type TaskCheckpoint = {
@@ -243,7 +148,6 @@ export type TaskCheckpoint = {
 
 export type TaskProgress = {
   taskId: string;
-  leaderId: string;
   status: 'in-progress' | 'completed' | 'failed';
   summary: string;
   percentComplete: number;
@@ -267,20 +171,6 @@ export const appendEscalation = async (escalation: Escalation): Promise<void> =>
 
 export const readEscalations = (): Promise<Escalation[]> =>
   readJson<Escalation[]>(paths.escalations, []);
-
-// --- Session ID (Orchestrator — for meetup / human messages) ---
-
-const sessionPath = join(ROOT, 'sessions', 'orchestrator.json');
-
-export const readSessionId = async (): Promise<string | null> => {
-  const data = await readJson<{ sessionId: string | null }>(sessionPath, {
-    sessionId: null,
-  });
-  return data.sessionId;
-};
-
-export const writeSessionId = (sessionId: string): Promise<void> =>
-  writeJson(sessionPath, { sessionId });
 
 // --- Task Sessions (per-task session for resumption after rest/freeze) ---
 

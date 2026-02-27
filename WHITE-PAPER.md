@@ -1,10 +1,31 @@
-# Vibe Guild — White Paper
+# LP;HU — Low Polish, High Utility
+### (formerly Vibe Guild)
 
 > **LP;HU — Low Polish, High Utility**
 >
 > 这不是一个浮夸的 AI 世界。这是一个笨人为自己造的实用工具。
 >
 > This is not a fancy AI world. This is a practical tool built by a dumb person, for a dumb person.
+
+---
+
+## 项目命名 / Project Name
+
+**中文**
+
+这个项目正式命名为 **LP;HU — Low Polish, High Utility**（低修饰，高实用）。
+
+名字本身就是设计原则：不追求优雅的架构、不追求 AI 能力的自我演进、不追求任何展示性的复杂度。只追求一件事——**对我当下的工作真实有用**。
+
+技术和模型会持续更新。我们跟着走，用更好的垂直 agent 和更强的模型做更有用的事。但我们永远不会为了"未来"去过度设计现在。
+
+**English**
+
+This project is formally named **LP;HU — Low Polish, High Utility**.
+
+The name is the design principle: no pursuit of elegant architecture, no AI self-evolution, no performative complexity. Just one goal — **genuinely useful for my work right now**.
+
+Technology and models will keep improving. We move with them, using better vertical agents and stronger models to do more useful things. But we never over-engineer the present for the sake of some imagined future.
 
 ---
 
