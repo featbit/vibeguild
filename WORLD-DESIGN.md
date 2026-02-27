@@ -114,6 +114,13 @@ The host orchestrator is responsible for:
 - escalation handling,
 - creator meetup and live intervention,
 - syncing task summaries into `world/`.
+
+**Discord fast-path (auto-assign bypass):** When a task is created via Discord (`/task`
+in `drainDiscordPendingCmds`), the system directly picks a free being and sets the task to
+`assigned` without waiting for an orchestrator AI call. If all beings are busy, it falls back
+to the normal orchestrator path. This eliminates the 30–60 s queue delay for interactive
+Discord tasks. The runner is started immediately after `updateTaskStatus(... 'assigned', leader, leaderId)`.
+The orchestrator's 5-second tick still reconciles any remaining `pending` tasks.
 - **crash recovery**: on restart, any task with `status: "in-progress"` in queue.json is
   automatically re-launched. The previous Docker container (if any) is removed first
   (`docker rm -f`) to avoid container name conflicts.
@@ -339,16 +346,25 @@ AGENTS.md                                →   /workspace/AGENTS.md             
 
 ### World-shared Tools and MCP Servers
 
-Sandbox beings can call tools and MCP servers. World-shared servers are configured
-once in `entrypoint.mjs` (`setupMcpConfig()`) and applied to every `claude` invocation
-via `--mcp-config`. Authorization tokens reuse existing env vars — no extra secrets.
+There are **two separate MCP registries** — one per runtime:
 
-To add a new MCP server or tool: add an entry to `src/sandbox/mcp-servers.mjs` (hardcoded world defaults) or use `npm run setup` in a separate terminal for the conversational setup assistant (persisted to `world/shared/mcp-servers.json`) — no other files need to change.
+| Registry | Used by | Managed via |
+|---|---|---|
+| `world/shared/mcp-servers.json` | Task runner sandbox (beings in Docker) | `npm run setup` |
+| `.claude/mcp-servers.json` | Discord bot (`handleMention` SDK session) | Edit file directly |
+| `world/shared/skills/` | Task runner sandbox (beings read at task start) | `npm run setup` |
+| `.claude/skills/<name>/SKILL.md` | Discord bot (SDK auto-discovers via `settingSources: ['project']`) | Create directory + SKILL.md |
+
+Both MCP files are **gitignored** (may contain auth tokens).
+
+**Task runner MCP:** Sandbox beings use servers configured in `src/sandbox/mcp-servers.mjs` (hardcoded world defaults) merged with `world/shared/mcp-servers.json` (operator additions via `npm run setup`). Applied to every `claude` invocation via `--mcp-config`.
 
 Runtime MCP config generation normalizes legacy server records automatically:
 - `transport: streamableHttp/http/sse/stdio` is converted to Claude CLI schema `type: http/sse/stdio`.
 - `transport` field is removed in generated `/tmp/vibeguild-mcp.json`.
 - Existing `world/shared/mcp-servers.json` entries remain backward compatible.
+
+**Discord bot MCP:** `handleMention` in `world.ts` loads `.claude/mcp-servers.json` and passes it as `mcpServers` to the SDK `query()` call. Edit this file directly to add/remove bot MCP servers.
 
 ### Sync mechanism (real-time)
 
@@ -551,16 +567,20 @@ npm run setup
 ```
 
 The assistant speaks natural language — you describe what you want and it handles the details.
-Capabilities:
+Capabilities (task runner sandbox only):
 - List, add, remove MCP servers (persisted to `world/shared/mcp-servers.json`)
 - **Test** whether an MCP endpoint actually responds before committing it
 - Add, remove shared skill files (`world/shared/skills/`)
+
+For **Discord bot** MCP and skills, edit directly:
+- MCP: `.claude/mcp-servers.json`
+- Skills: `.claude/skills/<name>/SKILL.md`
 
 Use `/task`, `/pause --task`, `/done` only in the `npm start` world terminal; do not use them in the setup terminal.
 
 MCP changes take effect for **new** sandbox tasks; running containers are unaffected.
 
-> `world/shared/mcp-servers.json` is **gitignored** — it may contain auth tokens and must not be committed.
+> Both `world/shared/mcp-servers.json` and `.claude/mcp-servers.json` are **gitignored** — they may contain auth tokens and must not be committed.
 
 ### /pause --task and alignment quick reference
 
@@ -569,6 +589,14 @@ MCP changes take effect for **new** sandbox tasks; running containers are unaffe
 /pause --task <id> <message>     Same + include your opening message.
 /msg --task <id> <message>       Inject a one-off message to a running task (no alignment mode).
 /done                            End alignment. Leader resumes the task independently.
+
+# Task revision — via natural conversation, NOT a slash command
+# Just @mention the bot expressing dissatisfaction, e.g.:
+#   "The blog post output has no images, just walls of text — please redo it"
+#   "The geo strategy output is too short, please redo with more detail"
+# The bot AI will identify which task you mean, extract your feedback,
+# ask for confirmation, then internally dispatch /revise <id> <feedback>.
+# Same team, same repo, same conversation history — picks up from where it left off.
 
 # MCP servers and shared skills are managed via: npm run setup (separate terminal)
 ```
@@ -624,7 +652,13 @@ Requires additionally `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
 
 **Extra capabilities over Mode A:**
 
-- **Conversational @mention (primary interface)** — @mention the bot in any channel with natural language:
+- **Conversational @mention (primary interface)** — @mention the bot in **any channel or task thread** with natural language.
+  The bot runs as a **stateful Claude Code SDK agent**: it uses `@anthropic-ai/claude-agent-sdk`'s `query()` function (the same SDK used by task runners), maintaining per-channel **session IDs** (server-side conversation state). "Yes" after a confirmation question is understood naturally — no regex, no separate confirmation state.
+  When writing from a task's own Discord thread, the bot automatically scopes context to that task.
+  Works in `#control-plane` (global context) or directly inside a task's forum post (task-scoped context):
+  - Session ID is stored per channel (`channelId → sessionId`). Subsequent @mentions pass `resume: sessionId` to the SDK.
+  - Claude receives a freshly-built world state snapshot on every call.
+  - Full conversation continuity is maintained server-side by the SDK.
   ```
   @VibeGuild new task: write a blog post about feature flags
   @VibeGuild list tasks
@@ -633,12 +667,13 @@ Requires additionally `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
   @VibeGuild msg abc12345: stop and wait for me
   @VibeGuild done
   ```
-  The bot parses the intent, **confirms** destructive/creative actions before executing, then replies in the same channel with progress. Results (task list, status) arrive via the control-plane webhook.
+  The bot parses the intent, **confirms** destructive/creative actions before executing, then replies in the same channel with progress.
 
   **Confirmation flow for new tasks:**
-  1. @mention with a task description → bot replies with a preview and asks "Shall I proceed? (yes/no)"
-  2. Reply `yes` (or `ok`, `go`, `确认`) → bot creates the task
-  3. Reply `no` (or `cancel`) → bot cancels
+  1. @mention with a task description → bot describes what it will do and asks "shall I proceed?" (does NOT yet queue the command)
+  2. @mention `yes` → bot calls `node scripts/vg-cmd.mjs cmd "/task ..."` via Bash in the next SDK turn
+  3. @mention `cancel` → bot acknowledges without executing
+  (No separate pending-state machine — Claude reads the session history and decides.)
 
 - **Native slash commands** — still available as fallback, registered automatically on startup:
   ```
@@ -674,7 +709,9 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 - World/global events → webhook → `#control-plane`
 - Task-specific events (progress, alignment) → Bot API → forum post thread in `#tasks`
 - If no thread registered for a task yet → falls back to webhook → `#control-plane`
-- @mention interactions → `messageCreate` Gateway event → `onMention` callback → **Claude AI** (Anthropic Messages API, `claude-haiku-4-5`) → structured JSON response (`reply`, `commands`, `needsConfirmation`) → optional confirmation flow → `processLine()` in `world.ts` → response via Bot API reply to same channel
+- @mention interactions → `messageCreate` Gateway event → per-channel `sessionId` lookup → `handleMention` callback → **Claude Code SDK** (`@anthropic-ai/claude-agent-sdk` `query()`) with `resume: sessionId` → multi-turn SDK loop (up to 10 turns) → plain text response via Bot API reply. Session ID stored back for next @mention in same channel.
+- World commands queued by Claude via `node scripts/vg-cmd.mjs cmd "/task ..." <channelId>` Bash call during the SDK loop → drained by `drainDiscordPendingCmds()` after SDK completes. When a `/task` command carries a `channelId`, the **existing forum post is reused** (via `registerExistingThread`) instead of creating a new one — this handles the flow where the operator manually creates a `#tasks` post and @mentions the bot from it.
+- Plain `/task` calls (no channelId) and all other commands → `processLine()` dispatched.
 - Slash command interactions → `interactionCreate` Gateway event → `commandCallback` in `world.ts` → response via webhook to `#control-plane`
 
 ### What gets mirrored
@@ -693,13 +730,39 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 
 ### Implementation
 
-`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`, `sendDirectReply()`, `setPendingConfirm()`
+`src/discord.ts` — `notifyDiscord()`, `notifyTask()`, `createTaskThread()`, `initDiscordBot()`, `flushDiscord()`, `sendDirectReply()`, `getActiveThreadLinks()`, `getTaskIdByChannelId()`
 Uses `discord.js` for Gateway WebSocket connection, @mention handling (`messageCreate` with `GuildMessages` + `MessageContent` intents), and slash command registration.
 `initDiscordBot(onCommand, onMention)` accepts two callbacks from `world.ts`:
 - `onCommand(line)` — processes slash commands (same as stdin)
-- `onMention(text, username, userId, channelId, reply)` — AI-powered handler implemented in `world.ts` using Claude via Anthropic Messages API
+- `onMention(userMessage, username, userId, channelId, sessionId, reply)` — AI-powered handler implemented in `world.ts` using `@anthropic-ai/claude-agent-sdk`
 
-`handleMention` in `world.ts` builds a system prompt with current task data, calls `claude-haiku-4-5`, parses the JSON response, sends an immediate reply, and executes any commands. For task creation it sets a `pendingConfirm` and waits for user yes/no.
+`handleMention` in `world.ts` runs the **Claude Code SDK `query()` loop** (up to 10 turns):
+1. Calls `query({ prompt, options: { resume: sessionId, allowedTools, settingSources: ['project'], permissionMode: 'bypassPermissions', maxTurns: 10, mcpServers, ... } })`.
+2. On first call (no session): sends full role + behaviour instructions + world state snapshot in `prompt`.
+3. On subsequent calls (has session): sends fresh world state + user message only; session history maintained server-side by SDK.
+4. Captures `session_id` from the `system/init` event; returns it so discord.ts can store it for the next call.
+5. After the loop: drains `world/discord-pending-cmds.json` (populated by Claude calling `node scripts/vg-cmd.mjs cmd "..."` via Bash) and dispatches each command to `processLine()`.
+
+Agent Skills in `.claude/skills/<name>/SKILL.md` are auto-discovered by the SDK via `settingSources: ['project']`.
+
+Available tools for the Discord bot session (same as task runners):
+| Tool | Purpose |
+|---|---|
+| `Bash` | Read world state via `vg.mjs`, queue commands via `vg-cmd.mjs` |
+| `Read` | Read files under `world/` or `output/` directly |
+| `Write` | Write scratch files if needed |
+| `WebSearch` / `WebFetch` | External research |
+
+World command dispatch (queued by Claude via Bash):
+| Bash call | Effect |
+|---|---|
+| `node scripts/vg-cmd.mjs cmd "/task <desc>"` | Create new task (after operator confirms) |
+| `node scripts/vg-cmd.mjs cmd "/revise <id> <feedback>"` | Revise a task |
+| `node scripts/vg-cmd.mjs cmd "/pause --task <id> [msg]"` | Pause a task for alignment |
+| `node scripts/vg-cmd.mjs cmd "/msg --task <id> <text>"` | Send message to running task |
+| `node scripts/vg-cmd.mjs cmd "/done"` | End alignment |
+
+No more `pendingConfirm` state machine — confirmation is handled through SDK session history.
 Wired into `src/world.ts`. Slash commands registered to all bot guilds on `ready`.
 
 > **⚠️ Privileged Intent**: `MessageContent` intent must be enabled in the Discord Developer Portal (Bot page → Privileged Gateway Intents) before @mention reading will work.

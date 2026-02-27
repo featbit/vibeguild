@@ -44,8 +44,13 @@ world/tasks/*
 # Output deliverables
 output/
 
-# Shared MCP registry — contains auth tokens, never commit
+# Shared MCP registry (task runners) — contains auth tokens, never commit
 world/shared/mcp-servers.json
+
+world/tasks/queue.json
+
+# Discord bot MCP registry — may contain auth tokens, never commit
+.claude/mcp-servers.json
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store

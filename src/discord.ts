@@ -56,6 +56,12 @@ const threadRegistry    = new Map<string, string>();  // taskId  → threadId
 const threadToTaskId    = new Map<string, string>();  // threadId → taskId
 const threadTitles      = new Map<string, string>();  // taskId  → human-readable title
 
+let _onThreadRegistered: ((taskId: string, channelId: string) => void) | null = null;
+/** Set a callback invoked whenever a task gets a Discord thread registered (new or existing post). */
+export const setOnThreadRegistered = (fn: (taskId: string, channelId: string) => void): void => {
+  _onThreadRegistered = fn;
+};
+
 /**
  * Returns a Discord channel mention string "<#threadId>" for the task,
  * or null if no thread has been created yet.
@@ -64,6 +70,13 @@ export const getTaskThreadMention = (taskId: string): string | null => {
   const threadId = threadRegistry.get(taskId);
   return threadId ? `<#${threadId}>` : null;
 };
+
+/**
+ * If the given channelId is a Discord forum thread that was created for a task,
+ * returns the taskId. Returns undefined otherwise.
+ */
+export const getTaskIdByChannelId = (channelId: string): string | undefined =>
+  threadToTaskId.get(channelId);
 
 /** Returns all registered task threads as { taskId, short, mention, url, title }. */
 export const getActiveThreadLinks = (): Array<{ taskId: string; short: string; mention: string; url: string | null; title: string }> => {
@@ -231,6 +244,7 @@ export const createTaskThread = async (task: TaskThreadInfo): Promise<void> => {
     threadRegistry.set(task.id, id);
     threadToTaskId.set(id, task.id);
     threadTitles.set(task.id, deriveThreadTitle(rawText));
+    _onThreadRegistered?.(task.id, id);
   };
 
   // Text channel: PUBLIC_THREAD (type 11)
@@ -265,6 +279,17 @@ export const createTaskThread = async (task: TaskThreadInfo): Promise<void> => {
   } catch { /* best-effort */ }
 };
 
+/**
+ * Register an already-existing Discord thread (e.g. a manually-created forum post)
+ * as the thread for a task. Skips new thread creation — the post already exists.
+ */
+export const registerExistingThread = (taskId: string, channelId: string): void => {
+  threadRegistry.set(taskId, channelId);
+  threadToTaskId.set(channelId, taskId);
+  threadTitles.set(taskId, channelId); // placeholder; title updated when notifyTask fires
+  _onThreadRegistered?.(taskId, channelId);
+};
+
 /** Update a task thread's name to reflect its final status (✅ / ❌). */
 export const closeTaskThread = async (taskId: string, status: 'completed' | 'failed'): Promise<void> => {
   if (!BOT_TOKEN) return;
@@ -287,30 +312,14 @@ export const closeTaskThread = async (taskId: string, status: 'completed' | 'fai
   } catch { /* best-effort */ }
 };
 
-// ─── Conversational @mention handler ────────────────────────────────────────
-
-type PendingConfirm = {
-  commands: string[];
-  description: string;
-  userId: string;
-};
-
-/** Per-channel pending confirmation state (for destructive/creative actions). */
-const pendingConfirms = new Map<string, PendingConfirm>();
-
-const CONFIRM_YES = /^(yes|y|ok|sure|confirm|go|proceed|yep|yeah|好|是|确认|执行|继续|没问题|可以|同意)/i;
-const CONFIRM_NO  = /^(no|n|cancel|nope|stop|取消|不|算了|不要|不用了)/i;
+// ─── Conversational @mention handler — session state ────────────────────────
 
 /**
- * Register a pending confirmation for a channel.
- * Called from world.ts after AI decides action needs user approval.
+ * Per-channel Claude Code session IDs.
+ * The @anthropic-ai/claude-agent-sdk maintains full conversation state server-side;
+ * we only need to track the session ID to resume the correct conversation.
  */
-export const setPendingConfirm = (
-  channelId: string,
-  entry: { commands: string[]; description: string; userId: string },
-): void => {
-  pendingConfirms.set(channelId, entry);
-};
+const channelSessions = new Map<string, string | null>();
 
 /** Send a plain message to a Discord channel directly via Bot API. */
 const sendDirectReply = async (channelId: string, content: string): Promise<void> => {
@@ -368,14 +377,21 @@ export const getTaskThreadUrl = (taskId: string): string | null => {
   return `https://discord.com/channels/${botGuildId}/${threadId}`;
 };
 
-/** Callback type for AI-powered natural-language @mention processing. */
+/**
+ * Callback type for Claude Code SDK-powered @mention processing.
+ * Receives the raw user message and a per-channel session ID (null if new).
+ * Returns the new session ID so the caller can persist it for the next turn.
+ */
 export type OnMentionFn = (
-  text: string,
+  userMessage: string,
   username: string,
   userId: string,
   channelId: string,
+  sessionId: string | null,
   reply: (msg: string) => Promise<void>,
-) => Promise<void>;
+  /** Recent message history in this channel/thread, newest-last. Null if unavailable. */
+  threadHistory: string | null,
+) => Promise<string | null>;
 
 /**
  * Start discord.js Gateway connection for slash command interactions.
@@ -419,9 +435,8 @@ export const initDiscordBot = (onCommand: (line: string) => void, onMention?: On
     );
   });
 
-  // ── @mention conversational handler ────────────────────────────────────────
+  // ── @mention conversational agent loop ────────────────────────────────────
   client.on('messageCreate', async (message: Message) => {
-    // Ignore bots and messages that don't @mention this bot
     if (message.author.bot) return;
     if (!client.user) return;
     if (!message.mentions.has(client.user.id)) return;
@@ -430,7 +445,6 @@ export const initDiscordBot = (onCommand: (line: string) => void, onMention?: On
     const userId = message.author.id;
     const channelId = message.channelId;
 
-    // Strip the @mention and clean up whitespace
     const raw = message.content
       .replace(/<@!?\d+>/g, '')
       .replace(/\s+/g, ' ')
@@ -438,47 +452,59 @@ export const initDiscordBot = (onCommand: (line: string) => void, onMention?: On
 
     const reply = (content: string): Promise<void> => sendDirectReply(channelId, content);
 
-    // ── Check for pending confirmation in this channel ────────────────────
-    const pending = pendingConfirms.get(channelId);
-    if (pending && pending.userId === userId) {
-      if (CONFIRM_YES.test(raw)) {
-        pendingConfirms.delete(channelId);
-        await reply(`✅ 正在执行…`);
-        for (const cmd of pending.commands) {
-          commandCallback?.(cmd);
-        }
-        return;
-      }
-      if (CONFIRM_NO.test(raw)) {
-        pendingConfirms.delete(channelId);
-        await reply(`❌ 已取消。还有什么需要帮忙的吗？`);
-        return;
-      }
-      // Not yes/no — fall through to re-process as fresh message
-      pendingConfirms.delete(channelId);
+    if (!raw) {
+      await reply(`👋 Hi! I'm the Vibe Guild assistant. What do you need?`);
+      return;
     }
 
-    if (!raw) {
-      await reply(`👋 你好！我是 Vibe Guild 助手，直接说中文就行，我都能理解！`);
+    if (!onMention) {
+      await reply(`⚠️ Mention handler not initialized, please try again later.`);
       return;
     }
 
     console.log(`\n📨 [Discord] @mention from ${username}: "${raw.slice(0, 80)}"`);
 
-    if (!onMention) {
-      await reply(`⚠️ 对话功能未初始化，请稍后再试。`);
-      return;
-    }
+    // ── Look up existing session for this channel ─────────────────────────
+    const sessionId = channelSessions.get(channelId) ?? null;
 
-    // Send immediate "thinking" indicator before slow AI call
-    await reply('🤔 思考中…').catch(() => undefined);
+    // ── Fetch thread / channel history (last 30 msgs before this one) ─────
+    // This gives Claude context of what was discussed even after a restart.
+    let threadHistory: string | null = null;
+    try {
+      const ch = message.channel;
+      if ('messages' in ch && typeof ch.messages === 'object' && ch.messages !== null) {
+        const fetched = await (ch.messages as { fetch: (opts: unknown) => Promise<Map<string, Message>> })
+          .fetch({ limit: 30, before: message.id });
+        const sorted = [...fetched.values()]
+          .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+        const lines = sorted
+          .filter((m) => m.content.trim())
+          .map((m) => {
+            const who = m.author.bot ? 'VibeGuild' : (m.author.displayName ?? m.author.username);
+            const text = m.content.replace(/<@!?\d+>/g, '').trim().slice(0, 500);
+            return `${who}: ${text}`;
+          });
+        if (lines.length > 0) threadHistory = lines.join('\n');
+      }
+    } catch { /* channel may not support fetch — ignore */ }
 
-    // Delegate entirely to AI handler in world.ts
-    // The handler may call commandCallback internally AND also call reply()
-    await onMention(raw, username, userId, channelId, reply).catch(async (err) => {
+    // Add reaction to indicate thinking (removed after SDK responds)
+    await message.react('🤔').catch(() => undefined);
+
+    // ── Call AI agent via Claude Code SDK ────────────────────────────────
+    const newSessionId = await onMention(raw, username, userId, channelId, sessionId, reply, threadHistory).catch(async (err) => {
       console.error('[Discord] onMention error:', err);
-      await reply(`❌ 出了点问题：${err instanceof Error ? err.message : String(err)}`);
+      await reply(`❌ Something went wrong: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
     });
+
+    // Remove thinking reaction
+    await message.reactions.cache.get('🤔')?.users.remove(client.user.id).catch(() => undefined);
+
+    // ── Store session ID for conversation continuity ──────────────────────
+    if (newSessionId) {
+      channelSessions.set(channelId, newSessionId);
+    }
   });
 
   client.on('interactionCreate', async (interaction) => {

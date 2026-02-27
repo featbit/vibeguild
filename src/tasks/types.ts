@@ -36,4 +36,9 @@ export type Task = {
   sandboxContainerId?: string;
   /** GitHub repo URL for this task's execution artifacts (docker mode). */
   sandboxRepoUrl?: string;
+  // ─── Revision tracking ──────────────────────────────────────────────
+  /** How many times this task has been re-run via /revise. */
+  revisionCount?: number;
+  /** The most recent revision feedback from the creator. */
+  revisionNote?: string;
 };

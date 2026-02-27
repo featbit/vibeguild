@@ -70,6 +70,7 @@ export const updateTaskStatus = async (
   taskId: string,
   status: TaskStatus,
   assignedTo?: string | string[],
+  leaderId?: string,
 ): Promise<void> => {
   const tasks = await readQueue();
   const updated = tasks.map((t) => {
@@ -84,6 +85,7 @@ export const updateTaskStatus = async (
       ...t,
       status,
       ...(normalizedAssignedTo !== undefined ? { assignedTo: normalizedAssignedTo } : {}),
+      ...(leaderId !== undefined ? { leaderId } : {}),
       ...(status === 'completed' ? { completedAt: new Date().toISOString() } : {}),
       updatedAt: new Date().toISOString(),
     };
@@ -92,6 +94,33 @@ export const updateTaskStatus = async (
 };
 
 export const getAllTasks = readQueue;
+
+/**
+ * Reset a completed or failed task for revision.
+ * Clears the old container ID, increments revision counter,
+ * stores the creator's feedback, and resets status to 'in-progress'
+ * so the scheduler will spin up a new sandbox.
+ */
+export const reviseTask = async (
+  taskId: string,
+  feedback: string,
+): Promise<Task | null> => {
+  const tasks = await readQueue();
+  const task = tasks.find((t) => t.id === taskId);
+  if (!task) return null;
+  const now = new Date().toISOString();
+  const revised: Task = {
+    ...task,
+    status: 'in-progress',
+    revisionCount: (task.revisionCount ?? 0) + 1,
+    revisionNote: feedback,
+    sandboxContainerId: undefined,
+    completedAt: undefined,
+    updatedAt: now,
+  };
+  await writeQueue(tasks.map((t) => (t.id === taskId ? revised : t)));
+  return revised;
+};
 
 /**
  * Record sandbox metadata (containerId, repoUrl) on the task after the

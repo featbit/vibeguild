@@ -1,4 +1,4 @@
-import { writeFile, mkdir, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { program } from 'commander';
@@ -24,6 +24,8 @@ import {
   getTaskSummary,
   getBusyBeings,
   getAllTasks,
+  reviseTask,
+  updateTaskStatus,
 } from './tasks/queue.js';
 import { createTaskRunner, type WorldTaskRunner } from './tasks/runner.js';
 import { loadRuntimeConfig, worldPath } from './runtime/config.js';
@@ -32,7 +34,7 @@ import {
   triggerMeetupResume,
 } from './scheduler/clock.js';
 import { createWorldMcpServer } from './tools/report.js';
-import { notifyDiscord, notifyDiscordRaw, notifyTask, createTaskThread, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread, getTaskThreadMention, getTaskThreadUrl, setPendingConfirm, getActiveThreadLinks } from './discord.js';
+import { notifyDiscord, notifyDiscordRaw, notifyTask, createTaskThread, registerExistingThread, setOnThreadRegistered, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread, getTaskThreadMention, getTaskThreadUrl, getActiveThreadLinks, getTaskIdByChannelId } from './discord.js';
 import type { OnMentionFn } from './discord.js';
 import type { WorldSignal } from './memory/types.js';
 import type { Task } from './tasks/types.js';
@@ -223,16 +225,29 @@ const runWorldLoop = async (): Promise<void> => {
         const label = p.status === 'completed' ? 'Task completed' : 'Task failed';
         const lines: string[] = [`${emoji} **${label}**`];
         if (p.summary) lines.push(`> ${p.summary}`);
+        // All checkpoints — show everything the agent actually did
         if (Array.isArray(p.checkpoints) && p.checkpoints.length > 0) {
-          const recent = p.checkpoints.slice(-5);
-          lines.push('**Steps:**');
-          for (const cp of recent) {
+          lines.push('**Steps completed:**');
+          for (const cp of p.checkpoints) {
             const desc = (cp as Record<string, unknown>)['description'] as string | undefined;
             if (desc) lines.push(`• ${desc}`);
           }
         }
-        if (p.sandboxRepoUrl) lines.push(`🔗 ${p.sandboxRepoUrl}`);
-        notifyTask(p.taskId, lines.join('\n'));
+        if (p.sandboxRepoUrl) lines.push(`🔗 **Repo:** ${p.sandboxRepoUrl}`);
+        // Try to read output/<taskId>/README.md for a richer results summary
+        void (async () => {
+          const cfg2 = loadRuntimeConfig();
+          const outputReadme = join(cfg2.workspaceRoot, 'output', p.taskId, 'README.md');
+          try {
+            const readme = await readFile(outputReadme, 'utf8');
+            // Prefer the ## Results section; fall back to first 800 chars
+            const resultsMatch = readme.match(/## Results([\s\S]{0,1500})/);
+            const snippet = resultsMatch ? resultsMatch[1].trim() : readme.slice(0, 800).trim();
+            if (snippet) lines.push(`\n**Output summary:**\n${snippet}`);
+          } catch { /* no README — fine */ }
+          notifyTask(p.taskId, lines.join('\n'));
+        })();
+        return; // notifyTask called inside async block above
       }
     },
     onComplete: (taskId: string) => { activeRunners.delete(taskId); },
@@ -270,6 +285,34 @@ const runWorldLoop = async (): Promise<void> => {
       `   Model   : ${modelId} | tasks: ${taskCount}`,
     );
   }
+
+  // ── Restore thread registry from disk (survives restarts) ─────────────────
+  {
+    const cfg = loadRuntimeConfig();
+    const tasksBaseDir = join(worldPath(cfg), 'tasks');
+    try {
+      const entries = await readdir(tasksBaseDir, { withFileTypes: true });
+      let restored = 0;
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        try {
+          const raw = await readFile(join(tasksBaseDir, entry.name, 'thread.json'), 'utf8');
+          const data = JSON.parse(raw) as { channelId?: string };
+          if (data.channelId) { registerExistingThread(entry.name, data.channelId); restored++; }
+        } catch { /* no thread.json for this task — fine */ }
+      }
+      if (restored > 0) console.log(`   Thread registry restored: ${restored} task(s)`);
+    } catch { /* tasks dir may not exist yet */ }
+  }
+
+  // Persist new thread registrations to disk so they survive restarts.
+  setOnThreadRegistered((taskId, channelId) => {
+    const cfg2 = loadRuntimeConfig();
+    const taskDir = join(worldPath(cfg2), 'tasks', taskId);
+    void mkdir(taskDir, { recursive: true })
+      .then(() => writeFile(join(taskDir, 'thread.json'), JSON.stringify({ channelId }, null, 2), 'utf8'))
+      .catch(() => undefined);
+  });
 
   // ── Recover in-progress tasks from a previous run ────────────────────────
   {
@@ -399,7 +442,72 @@ const runWorldLoop = async (): Promise<void> => {
       return;
     }
 
-    // /msg --task <id> <message> — inject message into a specific runner
+    // /revise <id> <feedback> — re-run a completed/failed task with creator feedback
+    if (input.startsWith('/revise ')) {
+      const rest = input.slice(8).trim();
+      const spaceIdx = rest.search(/\s/);
+      const rawId = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
+      const feedback = spaceIdx === -1 ? '' : rest.slice(spaceIdx + 1).trim();
+
+      if (!feedback) {
+        console.log(`\n⚠️  Usage: /revise <id> <feedback>\n`);
+        return;
+      }
+
+      void (async () => {
+        const allTasks = await getAllTasks();
+        const task = allTasks.find((t) => t.id === rawId || t.id.startsWith(rawId));
+        if (!task) {
+          console.log(`\n⚠️  Task not found: ${rawId}\n`);
+          return;
+        }
+        if (task.status !== 'completed' && task.status !== 'failed') {
+          console.log(`\n⚠️  Task ${task.id.slice(0, 8)} is "${task.status}" — can only revise completed or failed tasks.\n`);
+          return;
+        }
+        if (activeRunners.has(task.id)) {
+          console.log(`\n⚠️  Task ${task.id.slice(0, 8)} already has an active runner.\n`);
+          return;
+        }
+
+        const revised = await reviseTask(task.id, feedback);
+        if (!revised) return;
+
+        // Write the feedback to inbox.json — entrypoint reads it at startup
+        // as INITIAL INSTRUCTIONS FROM OPERATOR (see entrypoint.mjs line ~841)
+        const cfg = loadRuntimeConfig();
+        const taskDir = join(worldPath(cfg), 'tasks', revised.id);
+        await mkdir(taskDir, { recursive: true });
+        await writeFile(
+          join(taskDir, 'inbox.json'),
+          JSON.stringify({
+            messages: [
+              `[REVISION REQUEST] The creator has reviewed your previous output and is not satisfied.\n` +
+              `This is revision #${revised.revisionCount}.\n\n` +
+              `Creator's feedback:\n${feedback}\n\n` +
+              `Please review the existing repo and outputs, then address the feedback. ` +
+              `Continue from where you left off — do not start from scratch unless the feedback explicitly says so.`,
+            ],
+          }, null, 2),
+          'utf-8',
+        );
+
+        const revNum = revised.revisionCount ?? 1;
+        console.log(`\n✏️  Revision #${revNum} started for task ${revised.id.slice(0, 8)}: "${revised.title.slice(0, 72)}"`);
+        console.log(`   Feedback: "${feedback.slice(0, 120)}"\n`);
+        notifyDiscord(
+          `✏️  **Revision #${revNum}** — \`${revised.id.slice(0, 8)}\`\n` +
+          `   "${revised.title.slice(0, 72)}"\n` +
+          `   leader: ${revised.leaderId ?? '?'}\n` +
+          `   feedback: "${feedback.slice(0, 200)}"`,
+        );
+        void createTaskThread(revised);
+        const runner = createTaskRunner(revised, runnerOpts);
+        activeRunners.set(revised.id, runner);
+        void runner.start(revised);
+      })();
+      return;
+    }
     const taskMsgMatch = input.match(/^\/msg --task ([a-f0-9-]+) (.+)$/);
     if (taskMsgMatch) {
       const [, taskId, msg] = taskMsgMatch;
@@ -485,20 +593,71 @@ const runWorldLoop = async (): Promise<void> => {
     console.log(`\n💬 Message queued for Orchestrator (next assignment tick)\n`);
   };
 
-  // ── Claude-powered @mention handler ─────────────────────────────────────
-  const handleMention: OnMentionFn = async (text, username, userId, channelId, reply): Promise<void> => {
+  // ── Discord bot command drainer ───────────────────────────────────────────
+  // After each SDK call, drain any world commands Claude queued via scripts/vg-cmd.mjs.
+  // Entries may be plain strings OR {cmd, channelId} objects.
+  // When channelId is present on a /task command, the existing forum post is
+  // registered as the task thread (no new post created).
+  const drainDiscordPendingCmds = async (): Promise<void> => {
     const cfg = loadRuntimeConfig();
-    const apiKey = cfg.anthropicApiKey;
-    if (!apiKey) {
-      await reply('❌ ANTHROPIC_API_KEY not set — cannot process natural language.');
-      return;
-    }
-    const baseUrl = cfg.anthropicBaseUrl
-      ? cfg.anthropicBaseUrl.replace(/\/$/, '')
-      : 'https://api.anthropic.com';
-    const model = cfg.anthropicModel || 'claude-haiku-4-5';
+    const cmdFile = join(worldPath(cfg), 'discord-pending-cmds.json');
+    try {
+      const raw = await readFile(cmdFile, 'utf8');
+      const entries = JSON.parse(raw) as Array<string | { cmd: string; channelId?: string }>;
+      await writeFile(cmdFile, '[]', 'utf8');
+      for (const entry of entries) {
+        const cmd = typeof entry === 'string' ? entry : entry.cmd;
+        const sourceChannelId = typeof entry === 'object' ? entry.channelId : undefined;
+        if (!cmd.startsWith('/')) continue;
+        console.log(`\n📨 [Discord Bot cmd] ${cmd}`);
 
-    // Build rich task context for Claude
+        // /task — create task and immediately auto-assign a free being, skipping orchestrator AI
+        if (cmd.startsWith('/task ')) {
+          const desc = cmd.slice(6).trim();
+          void (async () => {
+            const task = await enqueueTask({ title: desc, description: desc, createdBy: 'human' });
+            console.log(`\n📋 Task added: ${task.id}\n`);
+            if (sourceChannelId) registerExistingThread(task.id, sourceChannelId);
+
+            // Pick a free being — avoids waiting for orchestrator AI call
+            const allBeings = await listBeings();
+            const busyBeings = await getBusyBeings();
+            const freeBeings = allBeings.filter((b) => !busyBeings.includes(b));
+            const leader = freeBeings[0] ?? allBeings[0];
+
+            if (leader) {
+              await updateTaskStatus(task.id, 'assigned', [leader], leader);
+              const assigned = (await getAllTasks()).find((t) => t.id === task.id)!;
+              notifyDiscord(`📋 Task added: ${task.id.slice(0, 8)}\n   "${desc.slice(0, 120)}"\n   leader: ${leader} (auto-assigned)`);
+              void appendSignal('TASK_ADDED', { taskId: task.id });
+              // Start runner directly — no orchestrator needed
+              const runner = createTaskRunner(assigned, runnerOpts);
+              activeRunners.set(task.id, runner);
+              void runner.start(assigned);
+              void createTaskThread(assigned).then(() => {
+                const threadUrl = getTaskThreadUrl(task.id);
+                if (threadUrl) notifyDiscordRaw(`🧵 Thread ready for \`${task.id.slice(0, 8)}\`: [Open →](${threadUrl})`);
+              });
+            } else {
+              // No beings at all — fall back to orchestrator
+              notifyDiscord(`📋 Task added: ${task.id.slice(0, 8)}\n   "${desc.slice(0, 120)}"\n   (no beings yet — orchestrator will assign)`);
+              void appendSignal('TASK_ADDED', { taskId: task.id });
+            }
+          })();
+          continue;
+        }
+
+        processLine(cmd);
+      }
+    } catch { /* file may not exist — fine */ }
+  };
+
+  // ── Claude Code SDK @mention handler ─────────────────────────────────────
+  const handleMention: OnMentionFn = async (userMessage, _username, _userId, channelId, sessionId, reply, threadHistory): Promise<string | null> => {
+    const cfg = loadRuntimeConfig();
+    const workspaceRoot = cfg.workspaceRoot;
+
+    // Build fresh world context on every call
     const allTasks = await getAllTasks();
     const now = Date.now();
     const taskLines = allTasks.length === 0
@@ -508,129 +667,155 @@ const runWorldLoop = async (): Promise<void> => {
           const ageH  = Math.round(ageMs / 36e5);
           const age   = ageH < 1 ? 'just now' : ageH < 24 ? `${ageH}h ago` : `${Math.round(ageH / 24)}d ago`;
           const short = t.id.slice(0, 8);
-          const leader = (t as Record<string, unknown>)['leader'] as string | undefined;
-          const prog = (t as Record<string, unknown>)['progress'] as string | undefined;
-          const leaderTag = leader ? ` [${leader}]` : '';
-          const progTag = prog ? ` — ${prog.slice(0, 80)}` : '';
-          return `  ${short} [${t.status}]${leaderTag} "${(t.title ?? '').slice(0, 70)}" (${age})${progTag}`;
+          const leader   = (t as Record<string, unknown>)['leader'] as string | undefined;
+          const prog     = (t as Record<string, unknown>)['progress'] as string | undefined;
+          const revNote  = (t as Record<string, unknown>)['revisionNote'] as string | undefined;
+          const revCount = (t as Record<string, unknown>)['revisionCount'] as number | undefined;
+          return `  ${short} [${t.status}]${leader ? ` [${leader}]` : ''} "${(t.title ?? '').slice(0, 70)}" (${age})${prog ? ` — ${prog.slice(0, 60)}` : ''}${revCount ? ` (rev#${revCount}${revNote ? ` "${revNote.slice(0, 30)}"` : ''})` : ''}`;
         }).join('\n');
 
-    const threadLines = getActiveThreadLinks().map((th) =>
-      `  ${th.short} → ${th.url ?? th.mention} "${th.title.slice(0, 60)}"`
-    ).join('\n') || '  (no active threads)';
+    const threadLines = getActiveThreadLinks()
+      .map((th) => `  ${th.short} → ${th.url ?? th.mention} "${th.title.slice(0, 60)}"`)
+      .join('\n') || '  (none)';
 
-    const systemPrompt = [
-      'You are the Vibe Guild operator assistant bot.',
-      'Vibe Guild is an autonomous AI world where Claude AI agents (called "beings") run tasks in isolated Docker containers.',
-      'You help the human operator manage the world through Discord @mentions.',
-      '',
-      '## Available Commands (you can trigger these)',
-      '- `/tasks` — list all tasks with status, progress, and Discord thread links',
-      '- `/status <8-char-id>` — detailed progress snapshot for a specific task',
-      '- `/task <full description>` — create a NEW task (ALWAYS ask for confirmation first)',
-      '- `/pause --task <8-char-id> [message]` — pause a running task for alignment/conversation',
-      '- `/msg --task <8-char-id> <message>` — inject a message into a running task',
-      '- `/done` — end alignment mode, let the leader continue independently',
-      '',
-      '## Current World State',
+    const threadTaskId = getTaskIdByChannelId(channelId);
+    const threadTask   = threadTaskId ? allTasks.find((t) => t.id === threadTaskId) : undefined;
+
+    const worldContext = [
+      `## World State (refreshed ${new Date().toISOString()})`,
       `Tasks (${allTasks.length} total):`,
       taskLines,
       '',
       'Active Discord threads:',
       threadLines,
-      '',
-      '## Response Instructions',
-      '- Understand the human\'s intent in ANY language (Chinese or English)',
-      '- Reason from the task data above to answer questions DIRECTLY without always running commands',
-      '- Only put commands in the "commands" array when an action is truly needed',
-      '- For creating tasks: ALWAYS set needsConfirmation=true — never create silently',
-      '- Respond in the SAME language the human used',
-      '- Be conversational, warm, concise — like a helpful team member, not a robot',
-      '- If unsure what task they mean, ask a clarifying question instead of guessing',
-      '',
-      'Respond ONLY with valid JSON (no markdown wrapper):',
-      '{',
-      '  "reply": "message to send immediately (markdown ok, keep ≤400 chars)",',
-      '  "commands": ["optional command strings"],',
-      '  "needsConfirmation": false,',
-      '  "confirmDescription": "only set when needsConfirmation is true"',
-      '}',
+      ...(threadTask ? [
+        '',
+        '## Thread Context',
+        `This message came from the Discord thread for task ${threadTask.id.slice(0, 8)} [${threadTask.status}] "${(threadTask.title ?? '').slice(0, 70)}".`,
+        'Treat this as the primary task unless the operator specifies otherwise.',
+      ] : []),
     ].join('\n');
 
-    interface AnthropicResponse {
-      content: Array<{ type: string; text: string }>;
-    }
-
-    interface MentionResult {
-      reply: string;
-      commands: string[];
-      needsConfirmation?: boolean;
-      confirmDescription?: string;
-    }
-
-    let result: MentionResult = { reply: '', commands: [] };
-
+    // Load Discord bot MCP config from .claude/mcp-servers.json (bot-specific).
+    // Task runner sandbox uses world/shared/mcp-servers.json separately.
+    let mcpServers: Record<string, unknown> = {};
     try {
-      const res = await fetch(`${baseUrl}/v1/messages`, {
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 1024,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: `${username}: ${text}` }],
-        }),
-      });
+      const raw = await readFile(join(workspaceRoot, '.claude/mcp-servers.json'), 'utf8');
+      mcpServers = JSON.parse(raw) as Record<string, unknown>;
+    } catch { /* not configured — fine */ }
 
-      if (!res.ok) {
-        const errBody = await res.text();
-        await reply(`❌ AI 服务错误 (${res.status}): ${errBody.slice(0, 200)}`);
-        return;
+    // First call (no session): include role + behaviour instructions.
+    // On resume: just inject fresh world state so Claude has the current task list.
+    const prompt = sessionId
+      ? [worldContext, '', `Operator: ${userMessage}`].join('\n')
+      : [
+          'You are the Vibe Guild operator assistant, embedded in Discord.',
+          'Vibe Guild is an autonomous AI world where AI agents (beings) run long-running tasks in Docker containers.',
+          'The operator uses you to manage tasks, inspect progress, read output, and communicate with running agents.',
+          '',
+          '## How to read world state',
+          '- `node scripts/vg.mjs overview` — world dashboard',
+          '- `node scripts/vg.mjs tasks` — all tasks',
+          '- `node scripts/vg.mjs progress <8-char-id>` — task progress detail',
+          '- Or read files directly: world/tasks/<uuid>/progress.json, output/<uuid>/',
+          '',
+          '## How to execute world commands',
+          'Queue a command via Bash (executes after you reply):',
+          `  \`node scripts/vg-cmd.mjs cmd "/task <full description>" ${channelId}\``,
+          '  `node scripts/vg-cmd.mjs cmd "/revise <8-char-id> <feedback>"`',
+          '  `node scripts/vg-cmd.mjs cmd "/pause --task <8-char-id> [msg]"`',
+          '  `node scripts/vg-cmd.mjs cmd "/msg --task <8-char-id> <text>"`',
+          '  `node scripts/vg-cmd.mjs cmd "/done"`',
+          '  (The channel ID after /task tells the world to reuse this Discord post as the task thread.)',
+          '',
+          '## CRITICAL: /task vs /revise — choosing the right command',
+          '- `/task` = brand new work, **creates a new GitHub repo** and new Docker container.',
+          '- `/revise <id> <feedback>` = continue/fix existing work, **reuses the same GitHub repo** already created for that task.',
+          '- Use your judgment to decide which one fits the operator\'s intent. When in doubt, ask the operator before proceeding.',
+          '- If this message came from a task thread, the task to revise is most likely the one this thread belongs to.',
+          '',
+          '## Skills',
+          'Agent Skills in .claude/skills/ are auto-discovered. Use them when relevant.',
+          '',
+          '## Behaviour rules',
+          '- Always respond in the same language as the operator (Chinese if they write Chinese, English otherwise). Be concise.',
+          '- For informational requests (status, progress, output): use tools immediately.',
+          '- For creating NEW tasks or revising existing ones: confirm with the operator FIRST (say what you will do, which command you will use, and ask "shall I proceed?"). Only queue the command when they confirm.',
+          '- For pause/msg/done: queue immediately, no confirmation needed.',
+          ...(threadTask ? [
+            '- **You are inside a task thread. Any code work (fix, test, build, run, or reading a GitHub repo) must go through /revise in Docker — do NOT use Bash to write/edit files, clone repos, run npm/git, or fetch GitHub content directly. Reading local world state files via Bash is fine.**',
+          ] : []),
+          '',
+          worldContext,
+          // Include thread history when available (especially important after a restart when
+          // the SDK session is gone but the Discord thread already has conversation context).
+          ...(threadHistory ? [
+            '',
+            '## Recent conversation history in this Discord thread (read-only context)',
+            '(These are the messages that appeared above your @mention in this thread.)',
+            threadHistory,
+          ] : []),
+          '',
+          `Operator: ${userMessage}`,
+        ].join('\n');
+
+    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    // Note: do NOT forward ANTHROPIC_MODEL_ID to the SDK — it is the BigModel
+    // proxy model name (GLM-5) and is not understood by the Claude Code SDK.
+    // The SDK uses the claude CLI which manages its own model selection.
+    const sdkOptions: Record<string, unknown> = {
+      allowedTools: ['Read', 'Write', 'Bash', 'WebSearch', 'WebFetch'],
+      settingSources: ['project'],
+      permissionMode: 'bypassPermissions',
+      maxTurns: 10,
+      ...(sessionId ? { resume: sessionId } : {}),
+      ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    };
+
+    let newSessionId: string | null = sessionId;
+    let finalReply = '';
+
+    console.log(`[Discord/SDK] query() start – channel=${channelId} resume=${!!sessionId}`);
+    try {
+      for await (const msg of query({ prompt, options: sdkOptions as Parameters<typeof query>[0]['options'] })) {
+        const m = msg as Record<string, unknown>;
+        console.log(`[Discord/SDK] msg type=${String(m['type'])} subtype=${String(m['subtype'] ?? '')}`);
+        if (m['type'] === 'system' && m['subtype'] === 'init' && m['session_id']) {
+          newSessionId = m['session_id'] as string;
+          console.log(`[Discord/SDK] session_id=${newSessionId}`);
+        }
+        if (m['type'] === 'assistant') {
+          const msgContent = (m['message'] as Record<string, unknown>)?.['content'];
+          const blocks = Array.isArray(msgContent) ? msgContent : [];
+          for (const block of blocks as Array<Record<string, unknown>>) {
+            if (block['type'] === 'text' && typeof block['text'] === 'string') {
+              finalReply = block['text'];
+            }
+          }
+        }
+        if (m['type'] === 'result') {
+          // SDKResultSuccess.result contains the final assistant text
+          if (typeof m['result'] === 'string' && m['result']) {
+            finalReply = m['result'];
+          }
+          console.log(`[Discord/SDK] result subtype=${String(m['subtype'])} reply_length=${finalReply.length}`);
+        }
       }
-
-      const data = await res.json() as AnthropicResponse;
-      const rawText = data.content.find((b) => b.type === 'text')?.text ?? '{}';
-
-      // Strip markdown code fence if present
-      const jsonStr = rawText
-        .replace(/^```(?:json)?\s*/i, '')
-        .replace(/\s*```\s*$/, '')
-        .trim();
-
-      try {
-        result = JSON.parse(jsonStr) as MentionResult;
-      } catch {
-        // Claude returned plain text instead of JSON — treat as reply
-        result = { reply: rawText.slice(0, 400), commands: [] };
-      }
+      console.log(`[Discord/SDK] query() done – reply length=${finalReply.length}`);
     } catch (err) {
-      await reply(`❌ 网络错误：${err instanceof Error ? err.message : String(err)}`);
-      return;
+      console.error(`[Discord/SDK] query() error:`, err);
+      await reply(`❌ Agent error: ${err instanceof Error ? err.message : String(err)}`);
+      return newSessionId;
     }
 
-    // 1. Send immediate reply
-    if (result.reply) {
-      await reply(result.reply);
+    // Drain any world commands Claude queued via scripts/vg-cmd.mjs
+    await drainDiscordPendingCmds();
+
+    if (finalReply) {
+      await reply(finalReply);
     }
 
-    // 2. If confirmation needed, register pending and stop
-    if (result.needsConfirmation) {
-      const desc = result.confirmDescription ?? result.commands.join(', ');
-      setPendingConfirm(channelId, { commands: result.commands ?? [], description: desc, userId });
-      return;
-    }
-
-    // 3. Execute commands
-    for (const cmd of (result.commands ?? [])) {
-      if (cmd.startsWith('/')) {
-        console.log(`\n📨 [Discord AI] executing: ${cmd}`);
-        processLine(cmd);
-      }
-    }
+    return newSessionId;
   };
 
   // ── Stdin (human operator) ───────────────────────────────────────────────
@@ -769,11 +954,19 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`   Leader   : ${task.leaderId ?? '?'}  |  team: ${(task.assignedTo ?? []).join(', ')}`);
         console.log(`   Priority : ${task.priority}  |  age: ${ageStr}`);
         console.log(`   Mode     : ${cfg2.mode}${cfg2.mode === 'docker' ? ` (image: ${cfg2.dockerImage}, exec: ${cfg2.executionMode})` : ' (local SDK)'}`);
-        notifyDiscord(`🚀 [World] Task started: ${task.id.slice(0, 8)}\n   "${task.title.slice(0, 72)}"\n   leader: ${task.leaderId ?? '?'}  priority: ${task.priority}`);
-        void createTaskThread(task);
         const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);
+        // Start thread creation in background; once resolved, post notification with clickable link.
+        void createTaskThread(task).then(() => {
+          const threadUrl = getTaskThreadUrl(task.id);
+          notifyDiscordRaw(
+            `🚀 **Task started** \`${task.id.slice(0, 8)}\`\n` +
+            `> "${task.title.slice(0, 72)}"\n` +
+            `> leader: ${task.leaderId ?? '?'}  priority: ${task.priority}` +
+            (threadUrl ? `\n> 🧵 [Open thread →](${threadUrl})` : ''),
+          );
+        });
       }
     }
 

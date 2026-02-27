@@ -135,6 +135,10 @@ Terminal commands available at any time in the `npm start` window:
 | `/msg --task <id> <message>` | Inject a message into a runner (soft, no abort — safe for sandbox tasks) |
 | Any other text | Queued as a human message to the Orchestrator |
 
+> **Task revision** — handled conversationally via Discord @mention.
+> Just describe what you're unhappy with in natural language; the bot AI identifies the task, extracts your feedback, and asks for confirmation before re-running.
+> Example: *"The blog task output has no real images, just AI filler — please redo it"*
+
 ### Check escalations
 
 Beings escalate to you by writing to `world/reports/escalations.json` and printing

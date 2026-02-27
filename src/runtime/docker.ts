@@ -191,6 +191,7 @@ export const createDockerSandboxAdapter = (
         ...(cfg.anthropicBaseUrl ? ['-e', `ANTHROPIC_BASE_URL=${cfg.anthropicBaseUrl}`] : []),
         ...(cfg.anthropicModel ? ['-e', `ANTHROPIC_MODEL=${cfg.anthropicModel}`] : []),
         '-e', `EXECUTION_MODE=${cfg.executionMode}`,
+        '-e', `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`,
         '-e', `VIBEGUILD_GITHUB_TOKEN=${cfg.githubToken}`,
         '-e', `VIBEGUILD_GITHUB_ORG=${cfg.githubOrg}`,
         '-e', `HOME=/home/sandbox`,
