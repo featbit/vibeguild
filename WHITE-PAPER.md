@@ -1,48 +1,131 @@
-我要构建一个服务，是一个 ai agent，来帮助我完成工作，帮助 featbit 做 vibe marketing 的。其中包括搜索内容，做可运行代码场景案例，写 blog insights 这些操作。
+# Vibe Guild — White Paper
 
-# Vibe Guild 白皮书
-
-Vibe Guild 是一个由 AI生灵组成的团队，旨在帮助我完成各种工作任务，特别是在 vibe marketing 方面。这个团队将利用现有的技术和工具，结合自主学习和适应能力，为我提供高效、智能的支持。
-
-Vibe Guild 是一个 AI 世界，这个世界中由 AI 生灵组成，他们有自己的职责和分工，能够自主学习、适应环境、协同工作、统一协调、向上汇报。他们有上下班概念，休息概念，到时间了就要停止，但是又必须明天来了可以继续工作。他们必须自主知道什么节点要向领导（即人类）上报。这样子人才好知道 AI生灵 做的对不对。他们必须有自己能够造tool的能力. 也就是说，AI生灵自己知道什么工具是必须的，什么工具是有用的，什么工具是无用的。并且能够自己造出这些工具来。他们必须有使用我提供的 tools, skills, mcp, bash cli 的能力。
-
-## 我想 vibe guild 帮我完成的工作
-
-初步实现的内容：帮助 FeatBit 做 vibe marketing 的工作，主要包括以下几个方面：
-
-- 在 Reddit, Hacker News, 我提供的链接、文章和内容里，持续监控和观察与 feature flag, feature management, feature experimentation, feature rollout, feature delivery 以及最前沿的 ai coding 技术相关的内容，分析和总结这些内容，提炼出有价值的 insights 和 trends。
-- 学习 FeatBit 已有的能力和工具，了解 FeatBit 的产品和服务，能够在需要的时候使用这些能力和工具来完成任务。
-- 通过和大模型交互，上网收集信息，阅读我提供的信息，持续学习和掌握优化 SEO 和 GEO 的方法。
-- 我发不一个大致的或具体的任务（会持续发布），你们要能够理解这个任务，并且能够分解成更小的子任务，制定一个合理的计划来完成这个任务。
-- 在完成任务的过程中，AI 生灵要自己组队，分工合作，协调工作，确保任务能够高效地完成。并且及时的和我进行沟通和汇报，确保我能够了解任务的进展和结果。尤其是要在过程中和我沟通，而不是完成之后再勾兑，这样子会导致我无法及时的调整和指导，可能会走弯路，浪费时间和资源。
-- 收到我的指令和任务后，自发为 FeatBit 思考和提出 vibe marketing 的创意和策略，尤其是借助用户痛点、行业趋势、竞争对手分析等方面，提出可以帮助 FeatBit 
-
-## 我会给这个 AI 世界提供的资源和工具
-
-1. 根据团队的反馈，提供相关的文档，访问权限的设置，工具的使用方法等资源和工具，帮助 AI 生灵更好地完成任务。
-2. 提供必要的培训和指导，帮助 AI 生灵更好地理解任务的要求和目标，以及如何使用提供的资源和工具来完成任务。以三方 MCP，我找到的 SKills，工具，bash cli 等方式。
-3. 定期与 AI 生灵进行沟通和反馈，了解他们的工作进展和遇到的困难，提供必要的支持和帮助，确保他们能够顺利完成任务。
-4. 鼓励 AI 生灵之间的协作和交流，促进他们之间的。
-
-## 这个世界与以往如 openclawd 等区别要解决的问题：
-
-1. 必须有固定的上下班时间，使 AI 生灵之间可以被强制的做个人工作总结，从而在持续激增的任务信息中，可以一直保持对任务的清晰认识和理解，知道自己在做什么，为什么要做，做完了有什么结果。
-2. 每天必须对一个大的任务进行例会，以保持团队协同的一致性和效率。通过例会，AI 生灵可以分享他们的工作进展、遇到的挑战和解决方案，促进团队之间的沟通和协作。
-3. 每个生灵都需要有一个自己的 memory 池之外，还需要有一个团队的 memory 池，这样子可以让生灵之间共享信息和知识，促进团队的协作和效率。甚至需要有一个世界 memory 池，知道曾经一起做过什么项目，可以以在新的项目中借鉴和参考，并更新迭代这个世界 memory 池。
-4. 生灵之间的沟通，团队之间的沟通，世界内部的沟通也应该建立足够好的机制。比如说，生灵之间的沟通可以通过一个专门的沟通工具来实现，团队之间的沟通可以通过定期的会议来实现，世界内部的沟通可以通过一个共享的知识库来实现。这样子可以确保信息的流动和共享，促进团队的协作和效率。
-5. 我发布的大任务之间可能是有关系的，应该可以互相借鉴和参考。如果有必要，甚至应该像我申请从而合并这些任务，或者拆分这些任务。这样子可以更好地利用资源和时间，提高效率和效果。
-6. AI 生灵或者团队，应该有能力自己造工具来完成任务。也就是说，他们应该能够根据任务的需求，分析和评估现有的工具，判断哪些工具是有用的，哪些工具是无用的，并且能够自己开发出新的工具来满足任务的需求。这样子可以提高效率和效果，更好地完成任务。
-7. 不同的项目，不同的 AI 生灵，不同的团队，彼此之间也应该有好的边界感，从而不去破坏其他的任务。
-8. 我会给一些外界的工具、workflow来让世界去直接调用，从而保证我已经确定好的工作是可以隔离被完成的，不会影响到其他的工作。
-
-## 我目前看到的可以基于已有能力作二开的技术：
-
-1. Kode cli and its SDK
-2. OpenCode and its SDK
-3. Claude Code and its SDK
-4. Copilot cli and its SDK
-5. 基于 Vercel ai-sdk 自己开发的 ai agent
-
+> **LP;HU — Low Polish, High Utility**
+>
+> 这不是一个浮夸的 AI 世界。这是一个笨人为自己造的实用工具。
+>
+> This is not a fancy AI world. This is a practical tool built by a dumb person, for a dumb person.
 
 ---
 
+## 核心立场 / Core Stance
+
+**中文**
+
+我不需要会自我进化的 AI 生灵，不需要花里胡哨的世界观。我需要的是：**一个通用 agent 框架作为底座，加上在我的准确监督下运行的垂直 agent 能力**。
+
+这个项目的第一原则是：**实用优先，过早优化是万恶之源。**
+
+**English**
+
+I don't need self-evolving AI beings, no elaborate world metaphors. What I need is: **a general-purpose agent framework as the foundation, plus vertical agent capabilities running under my accurate supervision**.
+
+The first principle of this project is: **utility first; premature optimization is the root of all evil.**
+
+---
+
+## 架构本质 / Architectural Reality
+
+**中文**
+
+Vibe Guild 本身是一个**通用 agent 框架**——它可以接受任意任务、调度执行、管理上下文。但它的每一项具体能力，都通过**垂直 agent + 大量 human-in-the-loop** 来保证完整性和准确性。
+
+这两层架构缺一不可：
+
+- **通用框架层**：负责任务调度、上下文持久化、工具注册、对齐机制。这一层越薄越好，不要在这里堆业务逻辑。
+- **垂直能力层**：每个具体任务（写 blog、监控社区、生成代码示例）都作为一个独立的垂直 agent 执行，配以准确、及时的人工介入来保证质量。
+
+瓶颈永远不是 AI 能力，而是**人对任务的总结性表达能力**。长时间不介入，agent 在 plan 阶段和实现阶段都会偏离你的真实意图。通用框架解决不了这个问题，只有及时的 human-in-the-loop 才能解决。
+
+**English**
+
+Vibe Guild itself is a **general-purpose agent framework** — it accepts arbitrary tasks, schedules execution, and manages context. But each concrete capability within it is guaranteed by **vertical agents + heavy human-in-the-loop**.
+
+These two layers are both essential:
+
+- **General framework layer**: handles task scheduling, context persistence, tool registration, and alignment mechanisms. Keep this layer thin — don't pile business logic here.
+- **Vertical capability layer**: each specific task (writing blogs, monitoring communities, generating code samples) runs as an isolated vertical agent, paired with accurate and timely human intervention to ensure quality.
+
+The bottleneck is never AI capability. It's **the human's ability to express intent clearly**. Leave it alone too long, and the agent drifts from your actual goal in both the planning and execution phases. A general framework can't fix this — only timely human-in-the-loop can.
+
+---
+
+## 什么是 Vibe Guild / What Is Vibe Guild
+
+**中文**
+
+Vibe Guild 是一个由**垂直 agent** 组成的任务执行框架，专为帮助 FeatBit 完成 vibe marketing 工作而构建：
+
+- 在 Reddit、Hacker News、指定链接中持续监控 feature flag、feature management、AI coding 等相关内容，提炼 insights 和 trends
+- 理解并分解我发布的任务，制定计划，执行，**过程中及时汇报**，不是做完了再说
+- 通过 MCP、Skills、CLI 工具组合完成工作，不自己造轮子
+
+任务的核心循环是：**我发布任务 → agent 执行 → 我在关键节点介入校正 → agent 继续**。
+
+**English**
+
+Vibe Guild is a **vertical-agent task execution framework** built specifically to help FeatBit with vibe marketing work:
+
+- Continuously monitor Reddit, Hacker News, and designated sources for content related to feature flags, feature management, and AI coding; extract insights and trends
+- Understand and decompose tasks I publish, plan, execute, and **report at key checkpoints during execution** — not after
+- Accomplish work through MCP, Skills, and CLI tooling — no reinventing wheels
+
+The core loop is: **I publish a task → agent executes → I step in at key points to correct → agent continues.**
+
+---
+
+## Human-in-the-Loop 是核心机制，不是可选项 / HITL Is the Core, Not Optional
+
+**中文**
+
+Agent 在两个阶段最容易偏离：
+
+1. **Plan 阶段**：对任务的理解和拆解可能跑偏
+2. **实现阶段**：执行路径可能偏离真实意图
+
+解决方法不是让 AI 更聪明，而是**让人的介入更精准、更及时**。Vibe Guild 的对齐机制（pause / alignment flow）正是为此而设计的。
+
+**English**
+
+Agents most commonly drift in two phases:
+
+1. **Planning phase**: task interpretation and decomposition goes off-track
+2. **Execution phase**: the implementation path diverges from actual intent
+
+The fix is not making AI smarter. It's **making human intervention more precise and timely**. The alignment mechanism in Vibe Guild (pause / alignment flow) is designed exactly for this.
+
+---
+
+## 演进策略 / Evolution Strategy
+
+**中文**
+
+- **SKILL 文件驱动演进**：能力的更新通过更新 SKILL.md 并重跑 coding agent 完成，不依赖运行时自学习
+- **不优化现在模型的弱点**：等 6–18 个月后更强的模型出来，自然解决
+- **保持简单**：只加对我当下有用的东西
+
+**English**
+
+- **SKILL-file-driven evolution**: capability updates happen by editing SKILL.md files and re-running the coding agent — no runtime self-learning required
+- **Don't patch today's model weaknesses**: stronger models in 6–18 months will handle this naturally
+- **Stay simple**: only add what is useful to me right now
+
+---
+
+## 关于 AI 的立场 / My Stance on AI
+
+**中文**
+
+我反对降临派——他们看上去比大多数笨人还笨。但我期待 AI 真正解放人类从无意义劳动中抽身的那一天。
+
+在那天到来之前，我选择做一个清醒的笨人：用准确的人工监督，驱动实用的垂直 agent，完成真实的工作。
+
+**English**
+
+I oppose AI accelerationism — they seem even less thoughtful than most ordinary people. But I look forward to the day AI genuinely frees humans from meaningless labor.
+
+Until then, I choose to be a clear-headed dumb person: using accurate human supervision to drive practical vertical agents to do real work.
+
+---
+
+*LP;HU — Low Polish, High Utility.*
