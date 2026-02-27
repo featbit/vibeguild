@@ -395,6 +395,148 @@ MCP changes take effect for **new** sandbox tasks only; running containers are u
 
 ---
 
+## Cron Jobs
+
+Inspired by [openclaw's cron pattern](https://github.com/openclaw/openclaw). Completed tasks
+that recur on a schedule can be registered as cron jobs so the world enqueues them automatically.
+
+### How it works
+
+```
+world/crons/{id}/job.json         ← one folder per job (mirrors world/tasks/)
+       │
+       ▼
+startCronScheduler()              ← runs at world startup (src/cron/scheduler.ts)
+       │
+       ├─ schedule.kind = "cron"  → registered with node-cron (exact expression + TZ)
+       ├─ schedule.kind = "every" → polled every 5s against nextRunAtMs
+       └─ schedule.kind = "at"    → polled every 5s, fires once when past ISO timestamp
+              │
+              ├─ runtime = "local"  → runs inline (no container); posts stdout to Discord
+              └─ runtime = "docker" → enqueueTask({ createdBy: "cron", discordThreadId }) → Docker container
+                      │
+                      ▼
+              Task progress + output posted to the **cron-job's own Discord thread**
+              (NOT a new tasks-forum post — `registerExistingThread(task.id, discordThreadId)`
+               is called BEFORE `createTaskThread`, so the tasks-forum post is never created;
+               all `notifyTask` calls route to the cron thread via the thread registry)
+```
+
+Each job has a top-level `runtime` field that controls execution:
+
+| `runtime` | Execution | Payload fields |
+|---|---|---|
+| `"local"` | Inline in the Node.js process — no container overhead. Good for frequent heartbeat-style jobs. | `{ description: string }` — run.mjs is executed; stdout posted to the job's Discord thread |
+| `"docker"` | Spawns a full AI Task in a Docker container (or local Task runner). Full Claude agent. All task notifications route to the **cron job's Discord thread** instead of the tasks forum. | `{ title, description, priority? }` — becomes the Task description |
+
+### Execution isolation
+
+`runtime: "docker"` jobs **do not share a sandbox**. Each fire creates a fresh Task. With
+`RUNTIME_MODE=docker` (recommended for production) every Task gets its own Docker container.
+`runtime: "local"` jobs run inline in the world process — no isolation, but no container cost.
+
+### Discord Forum Integration
+
+When `DISCORD_CRON_CHANNEL_ID` is set to the ID of a Discord **Forum** channel:
+
+- On startup (or when a new job is added), the scheduler **creates one Forum post per enabled
+  cron job** in that channel. The post title format is:
+  `⏰ <name> | <schedule> [enabled/disabled]`.
+- After every run, the scheduler **posts a run-summary message** to the job's forum thread:
+  - ✅ success or ❌ failure
+  - For `docker` jobs: Task ID that was spawned
+  - Next scheduled run time
+- When a job is enabled/disabled via `/cron enable|disable`, the thread title is updated to
+  reflect the new status.
+- Thread IDs are persisted in each `job.json` (`state.discordThreadId`) so associations
+  survive world restarts — the scheduler re-registers the existing thread instead of creating
+  a duplicate.
+
+### Natural language management via Discord
+
+Mention the operator bot in `#general` or `#control-plane` to manage cron jobs conversationally:
+
+> `@bot show me the cron jobs`
+> `@bot add a weekly trending analysis cron job every Monday at 9am Shanghai time`
+> `@bot disable the weekly-review job`
+> `@bot fire the daily-scraper job right now`
+
+The bot reads the current cron state from `node scripts/vg.mjs cron` and queues the appropriate
+`/cron list|add|remove|enable|disable|run` command after operator confirmation.
+
+**Cron thread assistant** — @mention the bot directly **inside a cron job's forum post** for
+focused single-job management:
+
+| Your message | Bot behaviour |
+|---|---|
+| "这个 job 是干什么的？" | Immediately explains the config (schedule, payload, run stats) |
+| "它跑起来了吗？" | Shows enabled/disabled, last run time and status, next run |
+| "帮我禁用它" | Disables immediately (no confirmation — reversible) |
+| "立即运行一次" | Fires the job immediately |
+| "改成每小时跑一次" | Confirms the schedule change then queues `/cron add` (update coming) |
+| "这个 job 被删了，帮我重装" | Asks you to describe what the job should do, then constructs `/cron add` JSON and confirms |
+
+If a cron forum thread exists but the corresponding job has been **deleted from the store**, the
+bot detects the orphaned thread and guides you through recreating the job via natural language.
+
+### Schedule kinds
+
+| Kind | Example | Description |
+|---|---|---|
+| `cron` | `"0 9 * * 1"` | 5-field cron expression, optional IANA TZ |
+| `every` | `everyMs: 86400000` | Fixed interval in milliseconds |
+| `at` | `"2026-03-01T09:00:00Z"` | One-shot ISO 8601 timestamp (UTC when no TZ) |
+
+### Operator commands
+
+```
+/cron list                    List all registered jobs
+/cron add <json>              Add a new job (see schema below)
+/cron remove <id-prefix>      Delete a job
+/cron enable <id-prefix>      Enable a disabled job
+/cron disable <id-prefix>     Disable without deleting
+/cron run <id-prefix>         Fire immediately (manual trigger)
+```
+
+**JSON schema for `/cron add`:**
+
+```json
+{
+  "name": "Weekly review",
+  "enabled": true,
+  "schedule": { "kind": "cron", "expr": "0 9 * * 1", "tz": "Asia/Shanghai" },
+  "payload": {
+    "title": "Weekly review",
+    "description": "Review the week's progress and plan the next sprint",
+    "priority": "normal"
+  }
+}
+```
+
+**Direct payload** (inline action — no task, no container):
+
+```json
+{
+  "name": "Hello World",
+  "enabled": true,
+  "schedule": { "kind": "every", "everyMs": 10000 },
+  "payload": { "kind": "direct", "message": "Hello World! 👋" }
+}
+```
+
+Use `kind: "direct"` for lightweight or high-frequency actions (notifications, health pings,
+metrics collection). The scheduler executes these inline in the host process — no Docker
+containers are spawned. The result is posted as a message to the job's Discord forum thread.
+
+### Files
+
+- `src/cron/types.ts` — `CronJob`, `CronSchedule`, `CronPayload`, `CronJobState` type definitions
+- `src/cron/store.ts` — JSON store (read/write jobs, mark fired, delete-after-run, set Discord thread)
+- `src/cron/scheduler.ts` — scheduler lifecycle (`startCronScheduler`, `stopCronScheduler`, `reloadCronScheduler`); Discord thread management
+- `src/discord.ts` — `createCronJobThread`, `notifyCronJob`, `updateCronJobThreadTitle` exports
+
+---
+
 ## Operator Quick Reference
 
 ```
@@ -403,6 +545,10 @@ MCP changes take effect for **new** sandbox tasks only; running containers are u
 /pause --task <id> <message>     Pause + include opening message
 /msg --task <id> <message>       Inject a one-off message (no alignment mode)
 /done                            End alignment. Agent resumes independently.
+/cron list                       List all cron jobs
+/cron add <json>                 Add a recurring job (fires a task on schedule)
+/cron remove|enable|disable <id> Manage cron jobs
+/cron run <id>                   Fire a cron job immediately
 ```
 
 When in **alignment mode**:
@@ -461,6 +607,7 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
 DISCORD_BOT_TOKEN=your-bot-token-here
 DISCORD_CONTROL_CHANNEL_ID=<control-plane channel id>
 DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
+DISCORD_CRON_CHANNEL_ID=<cron jobs forum channel id>   # optional; enables per-job forum posts
 ```
 
 ### Event routing
@@ -475,6 +622,9 @@ DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
 | Alignment resolved ✅ | Task's forum post |
 | Task assigned 📋 | `#control-plane` |
 | Task recovery ♻️ | `#control-plane` |
+| Cron job created | Cron's forum post (created) |
+| Cron job fired ✅/❌ | Cron's forum post (new message) |
+| Cron enabled/disabled | Cron's forum post (title updated) |
 
 ---
 

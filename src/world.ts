@@ -1,5 +1,9 @@
 import { writeFile, mkdir, readFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirnameWorld = dirname(fileURLToPath(import.meta.url));
 import { createInterface } from 'node:readline';
 import { program } from 'commander';
 import {
@@ -27,8 +31,17 @@ import {
   triggerMeetupFreeze,
   triggerMeetupResume,
 } from './scheduler/clock.js';
+import { startCronScheduler, reloadCronScheduler, fireJobNow } from './cron/scheduler.js';
+import {
+  listCronJobs,
+  addCronJob,
+  updateCronJob,
+  removeCronJob,
+  setCronJobDiscordThread,
+} from './cron/store.js';
+import type { CronJobCreate } from './cron/types.js';
 import { createWorldMcpServer } from './tools/report.js';
-import { notifyDiscord, notifyDiscordRaw, notifyTask, createTaskThread, registerExistingThread, setOnThreadRegistered, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread, getTaskThreadMention, getTaskThreadUrl, getActiveThreadLinks, getTaskIdByChannelId } from './discord.js';
+import { notifyDiscord, notifyDiscordRaw, notifyTask, createTaskThread, registerExistingThread, setOnThreadRegistered, initDiscordBot, flushDiscord, updateTaskThreadWithRepo, closeTaskThread, getTaskThreadMention, getTaskThreadUrl, getActiveThreadLinks, getTaskIdByChannelId, deleteDiscordChannel, listTasksChannelPosts, updateCronJobThreadTitle, getCronJobIdByThreadId } from './discord.js';
 import type { OnMentionFn } from './discord.js';
 
 // ─── World Engine ─────────────────────────────────────────────────────────────
@@ -40,6 +53,8 @@ const runWorldLoop = async (): Promise<void> => {
   const globalHumanMessages: string[] = [];
   // Tasks frozen by a task-level meetup (not globally frozen)
   const frozenTaskIds: string[] = [];
+  /** cron-triggered task IDs — used to skip closeTaskThread (we don't own that post title) */
+  const cronTaskIds = new Set<string>();
   let frozen = false;       // true during global meetup
   let resting = false;      // true between SHIFT_REST_START and SHIFT_DAY_END
   let schedulerBusy = false;
@@ -91,13 +106,25 @@ const runWorldLoop = async (): Promise<void> => {
         console.log(`\n🤔 [task:${short}] Agent needs your input:`);
         console.log(`   "${question}"`);
         console.log(`   ► Type your reply (press Enter to send). Type /done to let the agent proceed independently.\n`);
+        // Post to the task/cron thread
         notifyTask(p.taskId, `🤔 [task:${short}] Agent needs input:\n   "${question}"`);
+        // Also ping control-plane so operator sees it even if they're not watching the task thread
+        {
+          const threadUrl = getTaskThreadUrl(p.taskId);
+          const loc = threadUrl ? ` → [open thread](${threadUrl})` : '';
+          notifyDiscordRaw(`🤔 **Agent needs your input** \`${short}\`${loc}\n> "${question.slice(0, 300)}"\n> Reply in terminal or via \`/pause --task ${short}\``);
+        }
       } else if (p.status === 'waiting_for_human' && aligningTaskId === p.taskId) {
         // Already in alignment mode — agent wrote a new waiting_for_human (acknowledgment or follow-up)
         const question = p.question ?? p.summary;
         console.log(`\n💬 [task:${short}] ${question}`);
         console.log(`   ► Your reply:\n`);
         notifyTask(p.taskId, `💬 [task:${short}] ${question}`);
+        {
+          const threadUrl = getTaskThreadUrl(p.taskId);
+          const loc = threadUrl ? ` → [open thread](${threadUrl})` : '';
+          notifyDiscordRaw(`💬 **[task:${short}]**${loc}\n> ${question.slice(0, 300)}`);
+        }
       }
 
       // Auto-exit alignment mode when agent resumes on its own
@@ -110,8 +137,8 @@ const runWorldLoop = async (): Promise<void> => {
       // Post final output summary when the task is done
       if ((p.status === 'completed' || p.status === 'failed') && !runnerOpts._seenFinalOutput.has(p.taskId)) {
         runnerOpts._seenFinalOutput.add(p.taskId);
-        // Update the thread title with ✅ / ❌
-        void closeTaskThread(p.taskId, p.status);
+        // Update the thread title ✅/❌ — skip for cron tasks (we don't own that post's title)
+        if (!cronTaskIds.has(p.taskId)) void closeTaskThread(p.taskId, p.status);
         const emoji = p.status === 'completed' ? '🎉' : '💀';
         const label = p.status === 'completed' ? 'Task completed' : 'Task failed';
         const lines: string[] = [`${emoji} **${label}**`];
@@ -128,13 +155,27 @@ const runWorldLoop = async (): Promise<void> => {
         // Try to read output/<taskId>/README.md for a richer results summary
         void (async () => {
           const cfg2 = loadRuntimeConfig();
-          const outputReadme = join(cfg2.workspaceRoot, 'output', p.taskId, 'README.md');
+          const outputDir = join(cfg2.workspaceRoot, 'output', p.taskId);
+          // First: check for output/messages/*.md — each file = one Discord message (sorted by name)
+          const messagesDir = join(outputDir, 'messages');
           try {
-            const readme = await readFile(outputReadme, 'utf8');
-            // Prefer the ## Results section; fall back to first 800 chars
-            const resultsMatch = readme.match(/## Results([\s\S]{0,1500})/);
+            const { readdir } = await import('fs/promises');
+            const files = (await readdir(messagesDir)).filter((f) => f.endsWith('.md')).sort();
+            if (files.length > 0) {
+              notifyTask(p.taskId, lines.join('\n'));
+              for (const f of files) {
+                const content = (await readFile(join(messagesDir, f), 'utf8')).trim();
+                if (content) notifyTask(p.taskId, content, true);  // separate=true → own Discord message
+              }
+              return;
+            }
+          } catch { /* no messages dir — fall through */ }
+          // Fallback: read README.md ## Results section
+          try {
+            const readme = await readFile(join(outputDir, 'README.md'), 'utf8');
+            const resultsMatch = readme.match(/## Results([\s\S]{0,3000})/);
             const snippet = resultsMatch ? resultsMatch[1].trim() : readme.slice(0, 800).trim();
-            if (snippet) lines.push(`\n**Output summary:**\n${snippet}`);
+            if (snippet) lines.push(`\n**Output:**\n${snippet}`);
           } catch { /* no README — fine */ }
           notifyTask(p.taskId, lines.join('\n'));
         })();
@@ -206,6 +247,7 @@ const runWorldLoop = async (): Promise<void> => {
     for (const task of recovering) {
       console.log(`\n♻️  [World] Recovering task ${task.id.slice(0, 8)}: "${task.title}"`);
       notifyDiscord(`♻️  [World] Recovering task ${task.id.slice(0, 8)}\n   "${task.title.slice(0, 72)}"`);
+      if (task.discordThreadId) { registerExistingThread(task.id, task.discordThreadId); cronTaskIds.add(task.id); }
       void createTaskThread(task);
       const runner = createTaskRunner(task, runnerOpts);
       activeRunners.set(task.id, runner);
@@ -312,6 +354,148 @@ const runWorldLoop = async (): Promise<void> => {
           ...(threadUrl ? [`> thread  : [Open thread \u2192](${threadUrl})`] : threadMention ? [`> thread  : ${threadMention}`] : []),
         ];
         notifyDiscordRaw(lines.join('\n'));
+      })();
+      return;
+    }
+
+    // /cron — manage scheduled cron jobs
+    if (input.startsWith('/cron')) {
+      void (async () => {
+        const args = input.slice(5).trim();
+
+        // /cron list
+        if (!args || args === 'list') {
+          const jobs = await listCronJobs();
+          if (jobs.length === 0) {
+            notifyDiscord('⏰ No cron jobs registered.');
+            return;
+          }
+          const lines = jobs.map((j) => {
+            const sched =
+              j.schedule.kind === 'cron'
+                ? `cron:${j.schedule.expr}${j.schedule.tz ? ` (${j.schedule.tz})` : ''}`
+                : j.schedule.kind === 'every'
+                  ? `every:${j.schedule.everyMs}ms`
+                  : `at:${j.schedule.at}`;
+            const status = j.enabled ? '✅' : '⏸';
+            const last = j.state.lastRunAtMs
+              ? ` | last:${new Date(j.state.lastRunAtMs).toISOString().slice(11, 19)}Z`
+              : '';
+            const next = j.state.nextRunAtMs
+              ? ` | next:${new Date(j.state.nextRunAtMs).toISOString().slice(11, 19)}Z`
+              : '';
+            return `${status} \`${j.id.slice(0, 8)}\`  **${j.name}**  \`${sched}\`${last}${next}`;
+          });
+          notifyDiscordRaw(`**⏰ Cron Jobs (${jobs.length})**\n${lines.join('\n')}`);
+          return;
+        }
+
+        // /cron add <json>
+        if (args.startsWith('add ')) {
+          const rawJson = args.slice(4).trim();
+          // Normalize curly/smart quotes that LLMs sometimes emit → straight quotes
+          const jsonStr = rawJson
+            .replace(/[\u201c\u201d\u201e\u201f\u2033\u2036]/g, '"')
+            .replace(/[\u2018\u2019\u201a\u201b\u2032\u2035]/g, "'");
+          let input: CronJobCreate;
+          try {
+            input = JSON.parse(jsonStr) as CronJobCreate;
+          } catch {
+            notifyDiscord(`❌ /cron add: invalid JSON — ${jsonStr.slice(0, 100)}`);
+            return;
+          }
+          try {
+            const job = await addCronJob(input);
+            await reloadCronScheduler();
+            notifyDiscord(
+              `⏰ Cron job added: \`${job.id.slice(0, 8)}\` **${job.name}**`,
+            );
+          } catch (err) {
+            notifyDiscord(`❌ /cron add failed: ${String(err).slice(0, 200)}`);
+          }
+          return;
+        }
+
+        // /cron remove <id>
+        if (args.startsWith('remove ')) {
+          const prefix = args.slice(7).trim();
+          const jobs = await listCronJobs();
+          const job = jobs.find((j) => j.id === prefix || j.id.startsWith(prefix));
+          if (!job) { notifyDiscord(`⚠️ No cron job matching "${prefix}"`); return; }
+          await removeCronJob(job.id);
+          await reloadCronScheduler();
+          notifyDiscord(`🗑️ Cron job removed: \`${job.id.slice(0, 8)}\` **${job.name}**`);
+          return;
+        }
+
+        // /cron enable <id>
+        if (args.startsWith('enable ')) {
+          const prefix = args.slice(7).trim();
+          const jobs = await listCronJobs();
+          const job = jobs.find((j) => j.id === prefix || j.id.startsWith(prefix));
+          if (!job) { notifyDiscord(`⚠️ No cron job matching "${prefix}"`); return; }
+          await updateCronJob(job.id, { enabled: true });
+          await reloadCronScheduler();
+          void updateCronJobThreadTitle(job.id, true);
+          notifyDiscord(`✅ Cron job enabled: \`${job.id.slice(0, 8)}\` **${job.name}**`);
+          return;
+        }
+
+        // /cron disable <id>
+        if (args.startsWith('disable ')) {
+          const prefix = args.slice(8).trim();
+          const jobs = await listCronJobs();
+          const job = jobs.find((j) => j.id === prefix || j.id.startsWith(prefix));
+          if (!job) { notifyDiscord(`⚠️ No cron job matching "${prefix}"`); return; }
+          await updateCronJob(job.id, { enabled: false });
+          await reloadCronScheduler();
+          void updateCronJobThreadTitle(job.id, false);
+          notifyDiscord(`⏸ Cron job disabled: \`${job.id.slice(0, 8)}\` **${job.name}**`);
+          return;
+        }
+
+        // /cron run <id>  — fire immediately regardless of schedule
+        if (args.startsWith('run ')) {
+          const prefix = args.slice(4).trim();
+          const jobs = await listCronJobs();
+          const job = jobs.find((j) => j.id === prefix || j.id.startsWith(prefix));
+          if (!job) { notifyDiscord(`⚠️ No cron job matching "${prefix}"`); return; }
+          const taskId = await fireJobNow(job.id);
+          notifyDiscord(
+            taskId
+              ? `⏰ Cron job fired manually: \`${job.id.slice(0, 8)}\` **${job.name}** → task \`${taskId.slice(0, 8)}\``
+              : `⏰ Cron job fired manually: \`${job.id.slice(0, 8)}\` **${job.name}** (direct action)`,
+          );
+          return;
+        }
+
+        // Help
+        notifyDiscordRaw(
+          '**⏰ /cron usage:**\n' +
+          '• `/cron list` — list all jobs\n' +
+          '• `/cron add <json>` — add a job (see JSON schema below)\n' +
+          '• `/cron remove <id>` — delete a job\n' +
+          '• `/cron enable <id>` / `/cron disable <id>` — toggle\n' +
+          '• `/cron run <id>` — fire immediately\n' +
+          '\n**local runtime (inline, no container):**\n' +
+          '```json\n' +
+          '{\n' +
+          '  "name": "Hello World",\n' +
+          '  "enabled": true,\n' +
+          '  "runtime": "local",\n' +
+          '  "schedule": { "kind": "every", "everyMs": 10000 },\n' +
+          '  "payload": { "description": "Posts hello world and current timestamp" }\n' +
+          '}\n```' +
+          '\n\n**docker runtime (spawns AI Task):**\n' +
+          '```json\n' +
+          '{\n' +
+          '  "name": "Weekly review",\n' +
+          '  "enabled": true,\n' +
+          '  "runtime": "docker",\n' +
+          '  "schedule": { "kind": "cron", "expr": "0 9 * * 1", "tz": "Asia/Shanghai" },\n' +
+          '  "payload": { "title": "Weekly review", "description": "Review progress", "priority": "normal" }\n' +
+          '}\n```',
+        );
       })();
       return;
     }
@@ -482,6 +666,8 @@ const runWorldLoop = async (): Promise<void> => {
   // Entries may be plain strings OR {cmd, channelId} objects.
   // When channelId is present on a /task command, the existing forum post is
   // registered as the task thread (no new post created).
+  // When channelId is present on a /cron add command, the new job is linked to
+  // the existing forum post instead of creating a new one.
   const drainDiscordPendingCmds = async (): Promise<void> => {
     const cfg = loadRuntimeConfig();
     const cmdFile = join(worldPath(cfg), 'discord-pending-cmds.json');
@@ -494,6 +680,40 @@ const runWorldLoop = async (): Promise<void> => {
         const sourceChannelId = typeof entry === 'object' ? entry.channelId : undefined;
         if (!cmd.startsWith('/')) continue;
         console.log(`\n📨 [Discord Bot cmd] ${cmd}`);
+
+        // /cron add — create cron job; link to sourceChannelId if present (avoids new forum post)
+        if (cmd.startsWith('/cron add ')) {
+          const rawJson = cmd.slice('/cron add '.length).trim();
+          // Normalize curly/smart quotes that LLMs sometimes emit → straight quotes
+          const jsonStr = rawJson
+            .replace(/[\u201c\u201d\u201e\u201f\u2033\u2036]/g, '"')
+            .replace(/[\u2018\u2019\u201a\u201b\u2032\u2035]/g, "'");
+          // Only link to sourceChannelId if it's a cron-jobs thread, NOT a tasks thread
+          const linkedThreadId = sourceChannelId && !getTaskIdByChannelId(sourceChannelId)
+            ? sourceChannelId
+            : undefined;
+          void (async () => {
+            let input: CronJobCreate;
+            try {
+              input = JSON.parse(jsonStr) as CronJobCreate;
+            } catch {
+              notifyDiscord(`❌ /cron add: invalid JSON — ${jsonStr.slice(0, 100)}`);
+              return;
+            }
+            try {
+              const job = await addCronJob(input);
+              if (linkedThreadId) {
+                await setCronJobDiscordThread(job.id, linkedThreadId);
+                console.log(`\n🔗 [Cron] Linked job ${job.id.slice(0, 8)} to existing thread ${linkedThreadId}\n`);
+              }
+              await reloadCronScheduler();
+              notifyDiscord(`⏰ Cron job added: \`${job.id.slice(0, 8)}\` **${job.name}**`);
+            } catch (err) {
+              notifyDiscord(`❌ /cron add failed: ${String(err).slice(0, 200)}`);
+            }
+          })();
+          continue;
+        }
 
         // /task — create task and immediately auto-assign
         if (cmd.startsWith('/task ')) {
@@ -519,9 +739,70 @@ const runWorldLoop = async (): Promise<void> => {
           continue;
         }
 
+        // /del-thread <channelId> — delete a Discord thread/post by channel ID
+        if (cmd.startsWith('/del-thread ')) {
+          const targetId = cmd.slice(12).trim();
+          if (targetId) {
+            void (async () => {
+              const result = await deleteDiscordChannel(targetId);
+              if (result.ok) {
+                notifyDiscord(`🗑️ Thread deleted: ${targetId}`);
+              } else {
+                notifyDiscord(`❌ Failed to delete thread ${targetId}: ${result.error ?? 'unknown error'}`);
+              }
+            })();
+          }
+          continue;
+        }
+
+        // /list-threads — list all active posts in the tasks channel
+        if (cmd === '/list-threads') {
+          void (async () => {
+            const posts = await listTasksChannelPosts();
+            if (posts.length === 0) {
+              notifyDiscord('📋 No active threads found in the tasks channel.');
+            } else {
+              const lines = posts.map((p) => `  ${p.id}  ${p.name.slice(0, 70)}`);
+              notifyDiscord(`📋 Active threads in #tasks (${posts.length}):\n${lines.join('\n')}`);
+            }
+          })();
+          continue;
+        }
+
         processLine(cmd);
       }
     } catch { /* file may not exist — fine */ }
+  };
+
+  // ── Thread history compressor ──────────────────────────────────────────────
+  // When a Discord thread has many messages, passing the full history to the SDK
+  // burns turns on replay and risks hitting maxTurns before doing real work.
+  // Strategy: keep the RECENT_KEEP most recent lines verbatim; summarise older
+  // lines into one compact block (speaker → key action/decision, one line each).
+  const compressThreadHistory = (history: string, recentKeep = 12): string => {
+    const lines = history.split('\n').filter((l) => l.trim());
+    if (lines.length <= recentKeep) return history;
+
+    const older  = lines.slice(0, lines.length - recentKeep);
+    const recent = lines.slice(lines.length - recentKeep);
+
+    // Build a compact summary: deduplicate speaker+verb patterns
+    const summaryLines: string[] = [];
+    for (const line of older) {
+      const colon = line.indexOf(':');
+      if (colon === -1) { summaryLines.push(`  • ${line.slice(0, 100)}`); continue; }
+      const who  = line.slice(0, colon).trim();
+      const text = line.slice(colon + 1).trim().slice(0, 120);
+      summaryLines.push(`  • [${who}] ${text}`);
+    }
+
+    return [
+      `[Earlier conversation — ${older.length} messages compressed]`,
+      ...summaryLines,
+      '',
+      `[Recent ${recentKeep} messages — verbatim]`,
+      ...recent,
+    ].join('\n');
   };
 
   // ── Claude Code SDK @mention handler ─────────────────────────────────────
@@ -531,6 +812,7 @@ const runWorldLoop = async (): Promise<void> => {
 
     // Build fresh world context on every call
     const allTasks = await getAllTasks();
+    const allCronJobs = await listCronJobs();
     const now = Date.now();
     const taskLines = allTasks.length === 0
       ? '  (no tasks yet)'
@@ -553,10 +835,45 @@ const runWorldLoop = async (): Promise<void> => {
     const threadTaskId = getTaskIdByChannelId(channelId);
     const threadTask   = threadTaskId ? allTasks.find((t) => t.id === threadTaskId) : undefined;
 
+    // Detect if this message came from a cron job's forum post
+    const cronThreadJobId = getCronJobIdByThreadId(channelId);
+    const cronThreadJob   = cronThreadJobId ? allCronJobs.find((j) => j.id === cronThreadJobId) : undefined;
+    const isCronThread    = cronThreadJobId !== null;
+    const cronScriptPath  = cronThreadJob?.runtime === 'local'
+      ? join(__dirnameWorld, '..', 'world', 'crons', cronThreadJob.id, 'run.mjs')
+      : null;
+    const cronScriptExists = cronScriptPath ? existsSync(cronScriptPath) : false;
+
+    // Build a human-readable schedule string for the cron thread context
+    const formatCronSched = (j: typeof cronThreadJob): string => {
+      if (!j) return '?';
+      const s = j.schedule;
+      if (s.kind === 'cron')  return `cron  ${s.expr}${s.tz ? ` (${s.tz})` : ''}`;
+      if (s.kind === 'every') return `every ${s.everyMs}ms (${Math.round(s.everyMs / 1000)}s)`;
+      return `at    ${s.at}`;
+    };
+
+    const cronLines = allCronJobs.length === 0
+      ? '  (none)'
+      : allCronJobs.map((j) => {
+          const sched =
+            j.schedule.kind === 'cron'
+              ? `cron:${j.schedule.expr}${j.schedule.tz ? ` (${j.schedule.tz})` : ''}`
+              : j.schedule.kind === 'every'
+                ? `every:${j.schedule.everyMs}ms`
+                : `at:${j.schedule.at}`;
+          const last = j.state.lastRunAtMs ? new Date(j.state.lastRunAtMs).toISOString().slice(11, 19) + 'Z' : 'never';
+          const next = j.state.nextRunAtMs ? new Date(j.state.nextRunAtMs).toISOString().slice(11, 19) + 'Z' : '—';
+          return `  ${j.id.slice(0, 8)} [${j.enabled ? 'enabled' : 'disabled'}] "${j.name}" ${sched} | last:${last} | next:${next} | runs:${j.state.runCount ?? 0}`;
+        }).join('\n');
+
     const worldContext = [
       `## World State (refreshed ${new Date().toISOString()})`,
       `Tasks (${allTasks.length} total):`,
       taskLines,
+      '',
+      `Cron Jobs (${allCronJobs.length} total):`,
+      cronLines,
       '',
       'Active Discord threads:',
       threadLines,
@@ -565,6 +882,30 @@ const runWorldLoop = async (): Promise<void> => {
         '## Thread Context',
         `This message came from the Discord thread for task ${threadTask.id.slice(0, 8)} [${threadTask.status}] "${(threadTask.title ?? '').slice(0, 70)}".`,
         'Treat this as the primary task unless the operator specifies otherwise.',
+      ] : []),
+      ...(isCronThread ? [
+        '',
+        '## Cron Thread Context',
+        cronThreadJob
+          ? [
+              `This message came from the Discord forum post for cron job \`${cronThreadJob.id.slice(0, 8)}\` "${cronThreadJob.name}".`,
+              '',
+              'Current config:',
+              `  ID       : ${cronThreadJob.id}`,
+              `  Name     : ${cronThreadJob.name}`,
+              `  Enabled  : ${cronThreadJob.enabled ? 'yes \u2705' : 'no \u23f8'}`,
+              `  Schedule : ${formatCronSched(cronThreadJob)}`,
+              `  Runtime  : ${cronThreadJob.runtime}`,
+              ...(cronThreadJob.runtime === 'local' ? [
+                `  Desc     : ${'description' in cronThreadJob.payload ? (cronThreadJob.payload as { description: string }).description.slice(0, 120) : '(none)'}`,
+                `  Script   : world/crons/${cronThreadJob.id}/run.mjs ${cronScriptExists ? '\u2705 exists' : '\u26a0\ufe0f not written yet'}`,
+              ] : [
+                `  Payload  : docker \u2014 "${'title' in cronThreadJob.payload ? (cronThreadJob.payload as { title: string }).title.slice(0, 60) : ''}" / ${'priority' in cronThreadJob.payload ? ((cronThreadJob.payload as { priority?: string }).priority ?? 'normal') : 'normal'}`,
+              ]),
+              `  Runs     : ${cronThreadJob.state.runCount ?? 0} total${cronThreadJob.state.lastRunAtMs ? ` | last: ${new Date(cronThreadJob.state.lastRunAtMs).toISOString().slice(11, 19)}Z [${cronThreadJob.state.lastStatus ?? '?'}]` : ''}`,
+              `  Next run : ${cronThreadJob.state.nextRunAtMs ? new Date(cronThreadJob.state.nextRunAtMs).toISOString().slice(11, 19) + 'Z' : '\u2014'}`,
+            ].join('\n')
+          : `This message came from a cron jobs forum thread (channel: ${channelId}), but no matching cron job exists in the store — the job may have been deleted.\nOffer to recreate it: ask the operator to describe what they want, then construct /cron add JSON and confirm before queuing.`,
       ] : []),
     ].join('\n');
 
@@ -598,7 +939,44 @@ const runWorldLoop = async (): Promise<void> => {
           '  `node scripts/vg-cmd.mjs cmd "/pause --task <8-char-id> [msg]"`',
           '  `node scripts/vg-cmd.mjs cmd "/msg --task <8-char-id> <text>"`',
           '  `node scripts/vg-cmd.mjs cmd "/done"`',
+          '  `node scripts/vg-cmd.mjs cmd "/list-threads"`  ← list all active Discord posts in #tasks',
+          '  `node scripts/vg-cmd.mjs cmd "/del-thread <channelId>"`  ← delete a Discord thread/post by channel ID',
           '  (The channel ID after /task tells the world to reuse this Discord post as the task thread.)',
+          '',
+          '## Cron Job Management',
+          '- `node scripts/vg.mjs cron` — list all cron jobs (read-only, use this first to inspect)',
+          '- `node scripts/vg-cmd.mjs cmd "/cron list"` — list via world command',
+          `- \`node scripts/vg-cmd.mjs cmd "/cron add <json>" ${channelId}\` — add a new cron job (passing ${channelId} links it to THIS thread — no new forum post is created)`,
+          '- `node scripts/vg-cmd.mjs cmd "/cron remove <8-char-id>"` — delete a cron job',
+          '- `node scripts/vg-cmd.mjs cmd "/cron enable <8-char-id>"` — enable a cron job',
+          '- `node scripts/vg-cmd.mjs cmd "/cron disable <8-char-id>"` — disable a cron job',
+          '- `node scripts/vg-cmd.mjs cmd "/cron run <8-char-id>"` — fire a cron job immediately',
+          '',
+          'Cron job JSON schema for /cron add:',
+          '',
+          'runtime: "local" (inline, no container):',
+          '```json',
+          '{',
+          '  "name": "Hello World",',
+          '  "enabled": true,',
+          '  "runtime": "local",',
+          '  "schedule": { "kind": "every", "everyMs": 10000 },',
+          '  "payload": { "description": "Posts hello world and current timestamp" }',
+          '}',
+          '```',
+          '',
+          'runtime: "docker" (spawns AI Task in Docker container):',
+          '```json',
+          '{',
+          '  "name": "Weekly review",',
+          '  "enabled": true,',
+          '  "runtime": "docker",',
+          '  "schedule": { "kind": "cron", "expr": "0 9 * * 1", "tz": "Asia/Shanghai" },',
+          '  "payload": { "title": "Weekly review", "description": "Review progress and plan next week", "priority": "normal" }',
+          '}',
+          '```',
+          'Schedule kinds: cron (5-field expr + optional tz), every (everyMs: milliseconds), at (ISO datetime string).',
+          'IMPORTANT: Always confirm with the operator before adding, removing, or disabling a cron job.',
           '',
           '## CRITICAL: /task vs /revise — choosing the right command',
           '- `/task` = brand new work, **creates a new GitHub repo** and new Docker container.',
@@ -614,8 +992,29 @@ const runWorldLoop = async (): Promise<void> => {
           '- For informational requests (status, progress, output): use tools immediately.',
           '- For creating NEW tasks or revising existing ones: confirm with the operator FIRST (say what you will do, which command you will use, and ask "shall I proceed?"). Only queue the command when they confirm.',
           '- For pause/msg/done: queue immediately, no confirmation needed.',
+          '- For /del-thread (deleting Discord posts): ALWAYS confirm first. Show the operator which thread ID and name will be deleted, then ask "shall I proceed?". Only queue the delete command after explicit confirmation.',
+          '- For /list-threads: call immediately, no confirmation needed.',
           ...(threadTask ? [
             '- **You are inside a task thread. Any code work (fix, test, build, run, or reading a GitHub repo) must go through /revise in Docker — do NOT use Bash to write/edit files, clone repos, run npm/git, or fetch GitHub content directly. Reading local world state files via Bash is fine.**',
+          ] : []),
+          ...(isCronThread ? [
+            '- **You are inside a cron job\u2019s Discord forum post.**',
+            '  - Your primary focus is this specific cron job (see \'## Cron Thread Context\' in the world state above).',
+            '  - For read-only queries (show config, explain what it does, check status): answer immediately from context — no tool calls needed.',
+            '  - For enable / disable / run: queue immediately, no confirmation needed — these are instantly reversible.',
+            '  - For remove or schedule/payload changes: show the operator what you will change and confirm before queuing.',
+            '  - If the job is missing (deleted from store): say so clearly, offer to recreate it. Ask: "What should this job do? Describe the schedule and action." Then build the /cron add JSON and confirm before queuing.',
+            `  - To act: \`node scripts/vg-cmd.mjs cmd "/cron enable|disable|run|remove ${cronThreadJobId ?? '<id>'}"\``,
+            '  - To recreate: `node scripts/vg-cmd.mjs cmd "/cron add <json>"`',
+            ...(cronThreadJob?.runtime === 'local' ? [
+              `  - **This is a local runtime job.** The script that runs each tick is at: \`world/crons/${cronThreadJob.id}/run.mjs\``,
+              `    Script status: ${cronScriptExists ? '\u2705 exists' : '\u26a0\ufe0f not yet written'}.`,
+              '    You can write or update it using Bash. The script must be a self-contained Node.js ESM module.',
+              '    Whatever it prints to stdout will be posted to this thread after each run.',
+              '    Example to write: `echo \'console.log("Hello World! " + new Date().toISOString())\' > world/crons/<id>/run.mjs`',
+              '    Or write a full multi-line script using a heredoc / Bash file write.',
+              '    After writing the script, tell the operator what it does and offer to enable the job.',
+            ] : []),
           ] : []),
           '',
           worldContext,
@@ -625,7 +1024,7 @@ const runWorldLoop = async (): Promise<void> => {
             '',
             '## Recent conversation history in this Discord thread (read-only context)',
             '(These are the messages that appeared above your @mention in this thread.)',
-            threadHistory,
+            compressThreadHistory(threadHistory),
           ] : []),
           '',
           `Operator: ${userMessage}`,
@@ -639,7 +1038,7 @@ const runWorldLoop = async (): Promise<void> => {
       allowedTools: ['Read', 'Write', 'Bash', 'WebSearch', 'WebFetch'],
       settingSources: ['project'],
       permissionMode: 'bypassPermissions',
-      maxTurns: 10,
+      maxTurns: 50,
       ...(sessionId ? { resume: sessionId } : {}),
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
     };
@@ -807,6 +1206,8 @@ const runWorldLoop = async (): Promise<void> => {
         const runner = createTaskRunner(task, runnerOpts);
         activeRunners.set(task.id, runner);
         void runner.start(task);
+        // Register cron thread before createTaskThread so it skips tasks-forum post creation
+        if (task.discordThreadId) { registerExistingThread(task.id, task.discordThreadId); cronTaskIds.add(task.id); }
         // Start thread creation in background; once resolved, post notification with clickable link.
         void createTaskThread(task).then(() => {
           const threadUrl = getTaskThreadUrl(task.id);
@@ -816,6 +1217,7 @@ const runWorldLoop = async (): Promise<void> => {
             `> priority: ${task.priority}` +
             (threadUrl ? `\n> 🧵 [Open thread →](${threadUrl})` : ''),
           );
+
         });
       }
     }
@@ -842,6 +1244,9 @@ const runWorldLoop = async (): Promise<void> => {
 
   setInterval(() => { void tick(); }, 5_000);
   void tick(); // run immediately on startup
+
+  // ── Cron scheduler ───────────────────────────────────────────────────────
+  await startCronScheduler();
 };
 
 // ─── commands ─────────────────────────────────────────────────────────────────

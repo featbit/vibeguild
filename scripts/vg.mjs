@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Vibe Guild Creator CLI — core logic (called by vg and vg.ps1)
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -190,6 +190,43 @@ if (command === 'escalations') {
   process.exit(0);
 }
 
+if (command === 'cron') {
+  const cronsDir = join(root, 'world', 'crons');
+  const jobs = [];
+  try {
+    for (const entry of readdirSync(cronsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        const j = safeReadJson(join(cronsDir, entry.name, 'job.json'), null);
+        if (j) jobs.push(j);
+      }
+    }
+  } catch { /* crons dir may not exist yet */ }
+
+  hr('Cron Jobs');
+  if (jobs.length === 0) { console.log('No cron jobs registered.'); process.exit(0); }
+
+  for (const j of jobs) {
+    const id      = String(j?.id ?? '-').slice(0, 8);
+    const enabled = j?.enabled ? 'enabled ' : 'disabled';
+    const name    = truncate(j?.name, 30);
+    const rt      = (j?.runtime ?? 'docker').slice(0, 6);
+    const sched   = (() => {
+      const s = j?.schedule;
+      if (!s) return '-';
+      if (s.kind === 'cron')  return `cron:${s.expr}${s.tz ? ` (${s.tz})` : ''}`;
+      if (s.kind === 'every') return `every:${s.everyMs}ms`;
+      if (s.kind === 'at')    return `at:${s.at}`;
+      return '-';
+    })();
+    const st   = j?.state ?? {};
+    const last = st.lastRunAtMs ? ageMin(new Date(st.lastRunAtMs).toISOString()) + ' ago' : 'never';
+    const next = st.nextRunAtMs ? new Date(st.nextRunAtMs).toISOString().slice(11, 19) + 'Z' : '-';
+    const runs = st.runCount ?? 0;
+    console.log(`${id}  [${enabled}]  [${rt.padEnd(6)}]  ${name.padEnd(32)}  ${sched.padEnd(30)}  last:${last.padEnd(10)}  next:${next.padEnd(10)}  runs:${runs}`);
+  }
+  process.exit(0);
+}
+
 if (command === 'help') {
   console.log([
     'Vibe Guild Creator CLI (vg)',
@@ -202,6 +239,7 @@ if (command === 'help') {
     '  tasks [status] [limit]     Compact task list (default: all, limit 20)',
     '  progress <id|prefix>       Detail view for one task',
     '  escalations [limit]        Recent escalations (default: last 10)',
+    '  cron                       List all cron jobs with schedule, last run, next run',
     '  help                       Show this help',
     '',
     'Intervention commands (type in the world.ts terminal):',

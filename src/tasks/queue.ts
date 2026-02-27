@@ -30,6 +30,8 @@ export type EnqueueOptions = {
   parentId?: string;
   dependencies?: string[];
   requiresPlanApproval?: boolean;
+  /** Route task notifications to an existing Discord thread instead of creating a new one. */
+  discordThreadId?: string;
 };
 
 export const enqueueTask = async (opts: EnqueueOptions): Promise<Task> => {
@@ -48,6 +50,7 @@ export const enqueueTask = async (opts: EnqueueOptions): Promise<Task> => {
     requiresPlanApproval: opts.requiresPlanApproval ?? false,
     createdAt: now,
     updatedAt: now,
+    ...(opts.discordThreadId ? { discordThreadId: opts.discordThreadId } : {}),
   };
   tasks.push(task);
   await writeQueue(tasks);

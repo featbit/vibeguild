@@ -9,7 +9,7 @@ export type TaskStatus =
 
 export type TaskPriority = 'low' | 'normal' | 'high' | 'critical';
 
-export type TaskCreator = 'human' | 'orchestrator';
+export type TaskCreator = 'human' | 'orchestrator' | 'cron';
 
 export type TaskType = 'work' | 'meetup';
 
@@ -37,4 +37,9 @@ export type Task = {
   revisionCount?: number;
   /** The most recent revision feedback from the creator. */
   revisionNote?: string;
+  /**
+   * If set, the task's progress messages are routed to this existing Discord
+   * thread (e.g. a cron-job thread) instead of creating a new tasks-forum post.
+   */
+  discordThreadId?: string;
 };

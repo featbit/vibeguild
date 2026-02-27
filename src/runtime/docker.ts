@@ -184,6 +184,12 @@ export const createDockerSandboxAdapter = (
         '-e', `VIBEGUILD_GITHUB_ORG=${cfg.githubOrg}`,
         '-e', `HOME=/home/sandbox`,
         '-e', `TASK_DETAIL_DIR=${taskDetailsDir}`,
+        // Pass through Discord env vars so the sandbox agent can post to Discord directly
+        ...(process.env['DISCORD_WEBHOOK_URL']       ? ['-e', `DISCORD_WEBHOOK_URL=${process.env['DISCORD_WEBHOOK_URL']}`]             : []),
+        ...(process.env['DISCORD_BOT_TOKEN']         ? ['-e', `DISCORD_BOT_TOKEN=${process.env['DISCORD_BOT_TOKEN']}`]                 : []),
+        ...(process.env['DISCORD_CONTROL_CHANNEL_ID']? ['-e', `DISCORD_CONTROL_CHANNEL_ID=${process.env['DISCORD_CONTROL_CHANNEL_ID']}`] : []),
+        ...(process.env['DISCORD_TASKS_CHANNEL_ID']  ? ['-e', `DISCORD_TASKS_CHANNEL_ID=${process.env['DISCORD_TASKS_CHANNEL_ID']}`]   : []),
+        ...(process.env['DISCORD_CRON_CHANNEL_ID']   ? ['-e', `DISCORD_CRON_CHANNEL_ID=${process.env['DISCORD_CRON_CHANNEL_ID']}`]     : []),
         cfg.dockerImage,
         'node', '/workspace/src/sandbox/entrypoint.mjs',
       ];

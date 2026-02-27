@@ -31,19 +31,20 @@ import {
 const WEBHOOK_URL     = process.env['DISCORD_WEBHOOK_URL']        ?? '';
 const BOT_TOKEN       = process.env['DISCORD_BOT_TOKEN']          ?? '';
 const TASKS_CHANNEL   = process.env['DISCORD_TASKS_CHANNEL_ID']   ?? '';
+const CRON_CHANNEL    = process.env['DISCORD_CRON_CHANNEL_ID']    ?? '';
 const DISCORD_API     = 'https://discord.com/api/v10';
 const MAX_CONTENT_LEN   = 1_950;
 const FLUSH_INTERVAL_MS = 1_500;
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
 
-type QueuedMessage = { content: string; threadId?: string; raw?: boolean };
+type QueuedMessage = { content: string; threadId?: string; raw?: boolean; separate?: boolean };
 const queue: QueuedMessage[] = [];
 let flushTimer: ReturnType<typeof setInterval> | null = null;
 
-const enqueue = (content: string, threadId?: string, raw = false): void => {
+const enqueue = (content: string, threadId?: string, raw = false, separate = false): void => {
   if (!WEBHOOK_URL && !BOT_TOKEN) return;
-  queue.push({ content, threadId, raw });
+  queue.push({ content, threadId, raw, separate });
   if (!flushTimer) {
     flushTimer = setInterval(() => { void flush(); }, FLUSH_INTERVAL_MS);
     if (flushTimer.unref) flushTimer.unref();
@@ -55,6 +56,38 @@ const enqueue = (content: string, threadId?: string, raw = false): void => {
 const threadRegistry    = new Map<string, string>();  // taskId  → threadId
 const threadToTaskId    = new Map<string, string>();  // threadId → taskId
 const threadTitles      = new Map<string, string>();  // taskId  → human-readable title
+
+// ─── Cron thread registry (jobId → Discord thread id) ────────────────────────
+
+/**
+ * Minimal job shape needed by discord.ts cron functions.
+ * Mirrors src/cron/types.ts but avoids a circular import.
+ */
+export type CronJobInfo = {
+  id: string;
+  name: string;
+  description?: string;
+  enabled: boolean;
+  runtime: 'local' | 'docker';
+  schedule: {
+    kind: 'cron' | 'every' | 'at';
+    expr?: string;
+    tz?: string;
+    everyMs?: number;
+    at?: string;
+  };
+  payload:
+    | { description: string }           // local runtime — describes what run.mjs does
+    | { title: string; description: string; priority?: string };  // docker runtime
+  state?: {
+    lastRunAtMs?: number;
+    lastStatus?: string;
+    runCount?: number;
+    nextRunAtMs?: number;
+  };
+};
+
+const cronThreadRegistry = new Map<string, string>(); // jobId → Discord threadId
 
 let _onThreadRegistered: ((taskId: string, channelId: string) => void) | null = null;
 /** Set a callback invoked whenever a task gets a Discord thread registered (new or existing post). */
@@ -102,8 +135,12 @@ export const notifyDiscord = (line: string): void => enqueue(line);
 export const notifyDiscordRaw = (line: string): void => enqueue(line, undefined, true);
 
 /** Post a line to a task-specific thread (falls back to main channel if no thread yet). */
-export const notifyTask = (taskId: string, line: string): void =>
-  enqueue(line, threadRegistry.get(taskId));
+export const notifyTask = (taskId: string, line: string, separate = false): void =>
+  enqueue(line, threadRegistry.get(taskId), false, separate);
+
+/** Post a line directly to any thread by its Discord thread/channel ID. */
+export const notifyThreadById = (threadId: string, line: string): void =>
+  enqueue(line, threadId);
 
 /** Post repo URL to the task thread once the sandbox resolves it. */
 export const updateTaskThreadWithRepo = (taskId: string, repoUrl: string): void => {
@@ -126,7 +163,7 @@ const flush = async (): Promise<void> => {
   const groups: { threadId?: string; lines: string[]; raw: boolean }[] = [];
   for (const msg of queue.splice(0)) {
     const last = groups[groups.length - 1];
-    if (last && last.threadId === msg.threadId && last.raw === (msg.raw ?? false)) {
+    if (last && !msg.separate && last.threadId === msg.threadId && last.raw === (msg.raw ?? false)) {
       last.lines.push(msg.content);
     } else {
       groups.push({ threadId: msg.threadId, lines: [msg.content], raw: msg.raw ?? false });
@@ -312,6 +349,176 @@ export const closeTaskThread = async (taskId: string, status: 'completed' | 'fai
   } catch { /* best-effort */ }
 };
 
+/**
+ * Delete a Discord channel or thread/post by ID.
+ * Returns { ok: true } on success or { ok: false, error } on failure.
+ */
+export const deleteDiscordChannel = async (channelId: string): Promise<{ ok: boolean; error?: string }> => {
+  if (!BOT_TOKEN) return { ok: false, error: 'BOT_TOKEN not set' };
+  try {
+    const res = await fetch(`${DISCORD_API}/channels/${channelId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    });
+    if (res.ok) return { ok: true };
+    const body = await res.text().catch(() => '');
+    return { ok: false, error: `HTTP ${res.status}: ${body.slice(0, 200)}` };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+};
+
+// ─── Cron job Discord thread functions ──────────────────────────────────────
+
+/** Register an existing Discord thread as the forum post for a cron job. */
+export const registerCronJobThread = (jobId: string, threadId: string): void => {
+  cronThreadRegistry.set(jobId, threadId);
+};
+
+/**
+ * Reverse lookup: given a Discord channel/thread ID, return the cron job ID
+ * registered to it, or null if it belongs to no cron job.
+ */
+export const getCronJobIdByThreadId = (threadId: string): string | null => {
+  for (const [jobId, tid] of cronThreadRegistry.entries()) {
+    if (tid === threadId) return jobId;
+  }
+  return null;
+};
+
+/** Returns the Discord thread URL for a cron job, or null if not registered. */
+export const getCronJobThreadUrl = (jobId: string): string | null => {
+  const threadId = cronThreadRegistry.get(jobId);
+  if (!threadId || !botGuildId) return null;
+  return `https://discord.com/channels/${botGuildId}/${threadId}`;
+};
+
+/** Enqueue a message to a cron job's Discord forum post. No-op if no thread registered. */
+export const notifyCronJob = (jobId: string, line: string): void => {
+  enqueue(line, cronThreadRegistry.get(jobId), true);
+};
+
+const formatCronScheduleStr = (s: CronJobInfo['schedule']): string => {
+  if (s.kind === 'cron') return `${s.expr ?? '?'}${s.tz ? ` (${s.tz})` : ''}`;
+  if (s.kind === 'every') return `every ${s.everyMs ?? 0}ms`;
+  return `at ${s.at ?? '?'}`;
+};
+
+/**
+ * Create a Discord forum post for a cron job.
+ * Returns the Discord thread ID on success, null otherwise.
+ * Idempotent — returns the existing ID if already registered.
+ */
+export const createCronJobThread = async (job: CronJobInfo): Promise<string | null> => {
+  if (!BOT_TOKEN || !CRON_CHANNEL) return null;
+  const existing = cronThreadRegistry.get(job.id);
+  if (existing) return existing;
+
+  const short = job.id.slice(0, 8);
+  const schedStr = formatCronScheduleStr(job.schedule);
+  const threadTitle = `[${short}] ${job.name.slice(0, 50)}`;
+
+  const starterBody = [
+    `⏰ CRON JOB — ${short}`,
+    '─'.repeat(42),
+    `ID       : ${job.id}`,
+    `Name     : ${job.name}`,
+    `Enabled  : ${job.enabled ? 'yes' : 'no'}`,
+    `Schedule : ${job.schedule.kind}  ${schedStr}`,
+    '─'.repeat(42),
+    `Payload:`,
+    ...(job.runtime === 'local'
+      ? [
+          `  runtime  : local (executes world/crons/${job.id}/run.mjs)`,
+          `  desc     : ${'description' in job.payload ? (job.payload as { description: string }).description.slice(0, 300) : '(no description)'}`,
+          `  @mention me in this thread to write or update the script.`,
+        ]
+      : [
+          `  runtime  : docker`,
+          `  title    : ${'title' in job.payload ? job.payload.title : ''}`,
+          `  desc     : ${'description' in job.payload ? (job.payload as { description: string }).description.slice(0, 300) : ''}`,
+          `  priority : ${'priority' in job.payload ? (job.payload as { priority?: string }).priority ?? 'normal' : 'normal'}`,
+        ]),
+    '─'.repeat(42),
+    `Run log follows ↓`,
+  ].join('\n');
+
+  const headers = { Authorization: `Bot ${BOT_TOKEN}`, 'Content-Type': 'application/json' };
+
+  const tryCreate = async (body: Record<string, unknown>): Promise<string | null> => {
+    try {
+      const res = await fetch(`${DISCORD_API}/channels/${CRON_CHANNEL}/threads`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json() as { id: string };
+        cronThreadRegistry.set(job.id, data.id);
+        return data.id;
+      }
+    } catch { /* fall through */ }
+    return null;
+  };
+
+  // Forum channel (type 15) — starter message included in create
+  const forumId = await tryCreate({
+    name: threadTitle,
+    message: { content: `\`\`\`\n${starterBody}\n\`\`\`` },
+    auto_archive_duration: 10080,
+  });
+  if (forumId) return forumId;
+
+  // Text channel fallback — create thread, then post starter
+  const textId = await tryCreate({ name: threadTitle, type: 11, auto_archive_duration: 10080 });
+  if (textId) {
+    await sendBotMessage(starterBody, textId);
+    return textId;
+  }
+
+  return null;
+};
+
+/** Update cron job thread title to reflect enabled/disabled state. */
+export const updateCronJobThreadTitle = async (jobId: string, enabled: boolean): Promise<void> => {
+  if (!BOT_TOKEN) return;
+  const threadId = cronThreadRegistry.get(jobId);
+  if (!threadId) return;
+  try {
+    const res = await fetch(`${DISCORD_API}/channels/${threadId}`);
+    if (!res.ok) return;
+    const data = await res.json() as { name?: string };
+    // Strip existing status prefix, add new one
+    const base = (data.name ?? '').replace(/^[⏸▶️⏰\s]+\s*/, '');
+    const prefix = enabled ? '▶️' : '⏸';
+    await fetch(`${DISCORD_API}/channels/${threadId}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bot ${BOT_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: `${prefix} ${base}` }),
+    });
+  } catch { /* best-effort */ }
+};
+
+/**
+ * List all active threads/posts in the #tasks forum channel.
+ * Returns an empty array if the bot is not initialised or the channel is unset.
+ */
+export const listTasksChannelPosts = async (): Promise<Array<{ id: string; name: string }>> => {
+  if (!BOT_TOKEN || !botGuildId || !TASKS_CHANNEL) return [];
+  try {
+    const res = await fetch(`${DISCORD_API}/guilds/${botGuildId}/threads/active`, {
+      headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    });
+    if (!res.ok) return [];
+    const data = await res.json() as { threads?: Array<{ id: string; name: string; parent_id?: string }> };
+    return (data.threads ?? [])
+      .filter((t) => t.parent_id === TASKS_CHANNEL)
+      .map(({ id, name }) => ({ id, name }));
+  } catch {
+    return [];
+  }
+};
+
 // ─── Conversational @mention handler — session state ────────────────────────
 
 /**
@@ -443,7 +650,12 @@ export const initDiscordBot = (onCommand: (line: string) => void, onMention?: On
 
     const username = message.author.displayName ?? message.author.username;
     const userId = message.author.id;
-    const channelId = message.channelId;
+
+    // For forum thread posts, message.channelId is the THREAD id.
+    // message.channel may be a ThreadChannel — resolve the correct ID.
+    const ch = message.channel;
+    const isThread = 'parentId' in ch && ch.parentId !== null;
+    const channelId = isThread ? ch.id : message.channelId;
 
     const raw = message.content
       .replace(/<@!?\d+>/g, '')
