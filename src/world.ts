@@ -839,6 +839,20 @@ const runWorldLoop = async (): Promise<void> => {
     const cronThreadJobId = getCronJobIdByThreadId(channelId);
     const cronThreadJob   = cronThreadJobId ? allCronJobs.find((j) => j.id === cronThreadJobId) : undefined;
     const isCronThread    = cronThreadJobId !== null;
+
+    // ── Channel type detection ────────────────────────────────────────────
+    // control-plane : world management channel — existing behaviour
+    // task thread   : forum post for a task   — existing behaviour
+    // cron thread   : forum post for a cron   — existing behaviour
+    // text channel  : any other channel       → isolated workspace per channel
+    const CONTROL_PLANE_CHANNEL = process.env['DISCORD_CONTROL_CHANNEL_ID'] ?? '';
+    const isControlPlane = CONTROL_PLANE_CHANNEL !== '' && channelId === CONTROL_PLANE_CHANNEL;
+    const isTextChannel  = !isControlPlane && !threadTaskId && cronThreadJobId === null;
+    const textChannelDir = join(workspaceRoot, 'world', 'text-channels', channelId);
+
+    if (isTextChannel) {
+      await mkdir(textChannelDir, { recursive: true });
+    }
     const cronScriptPath  = cronThreadJob?.runtime === 'local'
       ? join(__dirnameWorld, '..', 'world', 'crons', cronThreadJob.id, 'run.mjs')
       : null;
@@ -917,11 +931,66 @@ const runWorldLoop = async (): Promise<void> => {
       mcpServers = JSON.parse(raw) as Record<string, unknown>;
     } catch { /* not configured — fine */ }
 
-    // First call (no session): include role + behaviour instructions.
-    // On resume: just inject fresh world state so Claude has the current task list.
-    const prompt = sessionId
-      ? [worldContext, '', `Operator: ${userMessage}`].join('\n')
-      : [
+    // ── Build prompt — branches on channel type ─────────────────────────
+    // Text channel: isolated workspace assistant (cwd = world/text-channels/<id>/)
+    // All other channels: world management operator assistant (existing behaviour)
+    const prompt = isTextChannel
+      ? (sessionId
+          // Resume text channel session — inject fresh world state as read-only context
+          ? [
+              `## Your workspace: world/text-channels/${channelId}/`,
+              `(cwd is set to this directory — use relative paths for files)`,
+              '',
+              worldContext,
+              ...(threadHistory ? [
+                '',
+                '## Recent conversation history',
+                compressThreadHistory(threadHistory),
+              ] : []),
+              '',
+              `User: ${userMessage}`,
+            ].join('\n')
+          // New text channel session — full instructions
+          : [
+              'You are Vibe Guild, an AI assistant in a Discord text channel.',
+              '',
+              '## Your isolated workspace',
+              `Working directory (cwd) is set to: ${textChannelDir}`,
+              'Write all output files here using relative paths.',
+              'Each Discord channel has its own independent workspace — do NOT write outside it.',
+              '',
+              '## Capabilities',
+              '- Read/write files in your workspace',
+              '- Run Bash commands (cwd = your workspace)',
+              '- Web search and fetch',
+              '- Read Vibe Guild world state (tasks, cron jobs) — read-only reference only',
+              '- Trigger Vibe Guild world operations via Bash:',
+              `    node ${join(workspaceRoot, 'scripts/vg-cmd.mjs')} cmd "/task <description>" ${channelId}`,
+              `    node ${join(workspaceRoot, 'scripts/vg-cmd.mjs')} cmd "/revise <8-char-id> <feedback>"`,
+              '',
+              '## Rules',
+              '- Respond in the same language as the user (Chinese if they write Chinese, English otherwise).',
+              '- For read-only queries (status, questions): answer immediately from world context — no tools needed.',
+              '- For code/file work: write to your workspace (cwd). Never write outside it.',
+              '- For creating NEW world tasks or revising existing ones: confirm with the user first, then queue via vg-cmd.mjs.',
+              '',
+              worldContext,
+              ...(threadHistory ? [
+                '',
+                '## Recent conversation history in this channel',
+                '(Messages above this @mention)',
+                compressThreadHistory(threadHistory),
+              ] : []),
+              '',
+              `User: ${userMessage}`,
+            ].join('\n')
+        )
+      // World management prompt (control-plane, task threads, cron threads)
+      // First call (no session): include role + behaviour instructions.
+      // On resume: just inject fresh world state so Claude has the current task list.
+      : (sessionId
+          ? [worldContext, '', `Operator: ${userMessage}`].join('\n')
+          : [
           'You are the Vibe Guild operator assistant, embedded in Discord.',
           'Vibe Guild is an autonomous AI world where AI agents (beings) run long-running tasks in Docker containers.',
           'The operator uses you to manage tasks, inspect progress, read output, and communicate with running agents.',
@@ -1028,7 +1097,8 @@ const runWorldLoop = async (): Promise<void> => {
           ] : []),
           '',
           `Operator: ${userMessage}`,
-        ].join('\n');
+        ].join('\n')
+        );
 
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
     // Note: do NOT forward ANTHROPIC_MODEL_ID to the SDK — it is the BigModel
@@ -1041,12 +1111,15 @@ const runWorldLoop = async (): Promise<void> => {
       maxTurns: 50,
       ...(sessionId ? { resume: sessionId } : {}),
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+      // Text channels: set isolated working directory so all file ops stay scoped
+      ...(isTextChannel ? { cwd: textChannelDir } : {}),
     };
 
     let newSessionId: string | null = sessionId;
     let finalReply = '';
 
-    console.log(`[Discord/SDK] query() start – channel=${channelId} resume=${!!sessionId}`);
+    const channelType = isTextChannel ? 'text' : isControlPlane ? 'control-plane' : isCronThread ? 'cron' : 'task';
+    console.log(`[Discord/SDK] query() start – channel=${channelId} type=${channelType} resume=${!!sessionId}`);
     try {
       for await (const msg of query({ prompt, options: sdkOptions as Parameters<typeof query>[0]['options'] })) {
         const m = msg as Record<string, unknown>;

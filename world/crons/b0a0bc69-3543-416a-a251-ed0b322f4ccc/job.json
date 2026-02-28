@@ -1,0 +1,20 @@
+{
+  "name": "HN Top 5 每小时推送",
+  "enabled": true,
+  "runtime": "docker",
+  "schedule": {
+    "kind": "every",
+    "everyMs": 18000000
+  },
+  "payload": {
+    "title": "HN Top 5 每小时推送",
+    "description": "HN Top 5 每小时推送",
+    "priority": "normal"
+  },
+  "id": "b0a0bc69-3543-416a-a251-ed0b322f4ccc",
+  "createdAt": "2026-02-28T06:17:43.619Z",
+  "updatedAt": "2026-02-28T06:17:44.783Z",
+  "state": {
+    "discordThreadId": "1477188002076692562"
+  }
+}

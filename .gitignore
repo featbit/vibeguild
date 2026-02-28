@@ -6,9 +6,6 @@ dist/
 # Everything under world/ is generated at runtime and should not be committed.
 # Folder structure is preserved via .gitkeep files.
 
-# Being directories (entire subtree per being)
-world/beings/*/
-
 # Flat runtime files
 world/signals.json
 world/memory/world.json
@@ -20,8 +17,6 @@ world/memory/weekly/*
 !world/memory/weekly/.gitkeep
 world/memory/monthly/*
 !world/memory/monthly/.gitkeep
-world/memory/project/*
-!world/memory/project/.gitkeep
 world/memory/team/*
 !world/memory/team/.gitkeep
 

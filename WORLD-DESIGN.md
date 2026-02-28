@@ -31,10 +31,7 @@ Supported task types:
      committed continuously. Survives container restarts; the recovery anchor for resuming tasks.
    - **Operator truth:** `world/` summaries and metadata — concise, decision-ready.
 
-4. **Cross-task continuity**
-   - Later tasks may build on completed tasks through `world/memory/project/` metadata.
-
-5. **Capability evolution through SKILLs**
+4. **Capability evolution through SKILLs**
    - Capabilities are updated by editing SKILL files and re-running the coding agent.
    - No runtime self-learning. No over-engineering for future model capabilities.
 
@@ -149,7 +146,6 @@ Sandbox responsibilities:
    | world/ (operator-facing, intervention-ready) |
    | - world/tasks/queue.json                     |
    | - world/tasks/{taskId}/progress.json         |
-   | - world/memory/project/{projectId}.json      |
    | - world/reports/escalations.json             |
    +----------------------+----------------------+
                  |
@@ -166,7 +162,6 @@ Sandbox responsibilities:
 - `world/tasks/queue.json` — task queue and lifecycle state
 - `world/tasks/{taskId}/progress.json` — real-time progress and checkpoints
 - `world/reports/escalations.json` — escalations needing operator attention
-- `world/memory/project/{projectId}.json` — cross-task context
 - `world/memory/world.json` — global world metadata
 
 Goals: concise, decision-ready, easy to read for both humans and future tasks.
@@ -569,11 +564,24 @@ Set `DISCORD_WEBHOOK_URL` in `.env`.
 
 Requires `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
 
-**Two-channel architecture:**
-- **`#control-plane`** — world events and primary @mention channel
-- **`#tasks`** — Forum channel; each task gets its own forum post
+**Channel architecture:**
 
-**@mention interface:**
+| Channel type | Behaviour | Workspace |
+|---|---|---|
+| `#control-plane` | World management — create/pause/revise tasks, inspect progress | `vibeguild/` root |
+| `#tasks` Forum | One post per task; task progress & alignment messages | Task's Docker container |
+| `#cron` Forum | One post per cron job; run summaries & config management | `world/crons/<id>/` |
+| Any text channel | **Per-channel isolated assistant** — independent conversation context & workspace | `world/text-channels/<channelId>/` |
+
+**Text channels — per-channel isolation:**
+- Each ordinary text channel gets its own **isolated working directory**: `world/text-channels/<channelId>/`
+- All file writes by the AI are scoped to that directory (SDK `cwd` is set to it)
+- Conversation context (session ID) is independent per channel — different channels don’t share history
+- Capabilities: Read/Write/Bash/Web — same as the operator assistant, but file-scoped
+- Can still read world state (tasks, cron jobs) and trigger world commands via `vg-cmd.mjs`
+- The directory is created automatically on first @mention
+
+**@mention interface (control-plane or text channel):**
 
 ```
 @LP;HU new task: write a blog post about feature flags
@@ -584,6 +592,7 @@ Requires `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
 ```
 
 The bot uses `@anthropic-ai/claude-agent-sdk` `query()` with per-channel session IDs.
+In control-plane: full world management prompt. In text channels: isolated assistant prompt.
 Destructive/creative actions are confirmed before executing.
 
 **Slash commands** (fallback):

@@ -4,7 +4,6 @@
  * Each container uses PRECISE volume mounts for isolation:
  *   - world/memory/world.json          :ro  — read dayCount, never write
  *   - world/tasks/{taskId}/             :rw  — progress.json + inbox.json (this task only)
- *   - world/beings/{id}/                :rw  — per assigned being only (other beings invisible)
  *   - output/{taskId}/                  :rw  — per-task deliverables directory (isolated per task)
  *   - src/sandbox/entrypoint.mjs        :ro  — the script that drives execution
  *   - AGENTS.md                         :ro  — world rules and being identity

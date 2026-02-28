@@ -4,19 +4,19 @@
   "runtime": "local",
   "schedule": {
     "kind": "every",
-    "everyMs": 21600000
+    "everyMs": 10800000
   },
   "payload": {
     "description": "提醒未完成任务"
   },
   "id": "dba258be-a26c-4eb8-9317-3d6763c33a50",
   "createdAt": "2026-02-27T17:27:24.522Z",
-  "updatedAt": "2026-02-27T18:04:57.841Z",
+  "updatedAt": "2026-02-28T16:59:19.920Z",
   "state": {
     "discordThreadId": "1476988157747531867",
-    "lastRunAtMs": 1772215497841,
+    "lastRunAtMs": 1772297959920,
     "lastStatus": "ok",
-    "runCount": 8,
-    "nextRunAtMs": 1772237096500
+    "runCount": 18,
+    "nextRunAtMs": 1772308758824
   }
 }

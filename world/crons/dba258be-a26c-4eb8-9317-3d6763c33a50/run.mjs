@@ -57,7 +57,7 @@ async function main() {
   }
   
   console.log('');
-  console.log('_下次提醒：10分钟后_');
+  console.log('_下次提醒：3小时后_');
 }
 
 main().catch(e => console.log('❌ 错误:', e.message));
