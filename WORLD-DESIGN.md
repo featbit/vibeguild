@@ -220,6 +220,8 @@ Two separate MCP registries:
 | `world/shared/skills/` | Task sandbox (read at task start) | `npm run setup` |
 | `.claude/skills/<name>/SKILL.md` | Discord bot (SDK auto-discovers) | Create directory + SKILL.md |
 
+Example shared topic: `world/shared/skills/using-featbit-skills.md` for guidance on applying FeatBit skills in task execution.
+
 Both MCP files are **gitignored** (may contain auth tokens).
 
 **Task MCP:** Configured in `src/sandbox/mcp-servers.mjs` (hardcoded defaults) merged with
