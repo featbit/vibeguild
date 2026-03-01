@@ -221,6 +221,7 @@ Two separate MCP registries:
 | `.claude/skills/<name>/SKILL.md` | Discord bot (SDK auto-discovers) | Create directory + SKILL.md |
 
 Example shared topic: `world/shared/skills/using-featbit-skills.md` for guidance on applying FeatBit skills in task execution.
+Imported FeatBit agent skills are available under `.claude/skills/featbit-*/` following the standard `SKILL.md` skill layout.
 
 Both MCP files are **gitignored** (may contain auth tokens).
 

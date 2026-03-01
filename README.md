@@ -258,7 +258,7 @@ The architecture target above is now the official design baseline.
 | Folder | Owner | Purpose |
 |--------|-------|---------|
 | `src/` | You | World Engine and orchestration runtime |
-| `.claude/` | You | World law, agent definitions, skills |
+| `.claude/` | You | World law, agent definitions, skills (including imported FeatBit skills under `.claude/skills/featbit-*/`) |
 | `world/` | Runtime + Beings | Creator-facing state, memory, tasks, reports |
 | `output/` | Beings | Deliverables — drafts, reports, artifacts |
 
