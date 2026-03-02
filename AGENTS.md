@@ -31,3 +31,7 @@ For any Microsoft technology stack — such as Azure, .NET, GitHub, GitHub Copil
 ### FeatBit Skills
 
 FeatBit skills are stored under `.agents/skills/featbit/`. Use these skills to understand FeatBit concepts, feature flag management, SDK integration, and deployment patterns.
+
+## Language
+
+- Use English for all code comments, documentation, and communication unless the user explicitly requests another language.

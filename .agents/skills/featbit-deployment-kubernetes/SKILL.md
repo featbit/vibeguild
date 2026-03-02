@@ -1,15 +1,6 @@
 ---
 name: featbit-deployment-kubernetes
-description: Deploys FeatBit to Kubernetes using Helm Charts. Use when user mentions "Kubernetes", "Helm", "K8s", "kubectl", works with values.yaml files, asks about "cloud deployment", "AKS", "EKS", "GKE", "ingress", or needs production-grade container orchestration setup.
-appliesTo:
-  - "**/values.yaml"
-  - "**/values.yml"
-  - "**/Chart.yaml"
-  - "**/*-deployment.yaml"
-  - "**/*-service.yaml"
-  - "**/*-ingress.yaml"
-  - "**/*-configmap.yaml"
-  - "**/*-secret.yaml"
+description: Deploys FeatBit to Kubernetes using Helm Charts. Use when user mentions "Kubernetes", "Helm", "K8s", "kubectl", works with values.yaml files, asks about "cloud deployment", "Azure Kubernetes", "AKS", "EKS", "GKE", "ingress", or needs production-grade container orchestration setup.
 ---
 
 # FeatBit Kubernetes Deployment with Helm
