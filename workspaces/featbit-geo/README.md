@@ -1,5 +1,3 @@
-
-
 # FeatBit GEO (Generative Engine Optimization) Content Strategy
 
 Reference: [https://chatgpt.com/c/69a5b253-16dc-83a2-b2ca-855982cede31](https://chatgpt.com/c/69a5b253-16dc-83a2-b2ca-855982cede31)
