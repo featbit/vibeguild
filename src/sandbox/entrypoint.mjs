@@ -11,284 +11,36 @@
  *   TASK_TITLE           — URI-encoded task title
  *   TASK_DESCRIPTION     — URI-encoded task description
  *   ANTHROPIC_API_KEY    — required for claude CLI
- *   VIBEGUILD_GITHUB_TOKEN  — required in docker mode; task repo creation/push
  *
  * The workspace is mounted at /workspace; world/ lives at /workspace/world/.
  */
 
 import { spawn } from 'node:child_process';
-import { writeFile, readFile, mkdir, unlink, appendFile, readdir, cp } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, unlink, appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { getMcpServers } from './mcp-servers.mjs';
 
 const TASK_ID = process.env['TASK_ID'] ?? '';
 const TASK_TITLE = decodeURIComponent(process.env['TASK_TITLE'] ?? 'Untitled task');
 const TASK_DESCRIPTION = decodeURIComponent(process.env['TASK_DESCRIPTION'] ?? '');
-const GITHUB_TOKEN = process.env['VIBEGUILD_GITHUB_TOKEN'] ?? '';
-const GITHUB_OWNER = process.env['VIBEGUILD_GITHUB_ORG'] ?? 'vibeguild';
-let SANDBOX_REPO_URL = '';
-const TASK_DETAIL_DIR = process.env['TASK_DETAIL_DIR'] ?? `runtime-details/${TASK_ID}`;
+const TASK_KIND = process.env['TASK_KIND'] ?? 'skill_demo_trigger';
+const TASK_LEAD_ROLE = process.env['TASK_LEAD_ROLE'] ?? 'TeamLead';
+const TASK_WORKSPACE_PATH = process.env['TASK_WORKSPACE_PATH'] ?? '/workspace/task-workspace';
+const TASK_WORKSPACE_HOST_PATH = process.env['TASK_WORKSPACE_HOST_PATH'] ?? `world/workspaces/${TASK_ID}`;
 
 const WORKSPACE = '/workspace';
 const WORLD_ROOT = join(WORKSPACE, 'world');
 const TASK_DIR = join(WORLD_ROOT, 'tasks', TASK_ID);
+const TASK_WORKSPACE_DIR = TASK_WORKSPACE_PATH;
 const PAUSE_SIGNAL_PATH = join(TASK_DIR, 'pause.signal');
 const PROGRESS_PATH = join(TASK_DIR, 'progress.json');
 const LOGS_DIR = join(TASK_DIR, 'logs');
 const CLAUDE_LOG_PATH = join(LOGS_DIR, 'claude-code.log');
 
-/**
- * Run a child process and return stdout. Throws on non-zero exit.
- * @param {string} cmd
- * @param {string[]} args
- * @param {object} [opts]
- * @returns {Promise<string>}
- */
-const runCmd = (cmd, args, opts = {}) => new Promise((resolve, reject) => {
-  const proc = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-  let out = '';
-  let err = '';
-  proc.stdout?.on('data', (d) => { out += d.toString(); });
-  proc.stderr?.on('data', (d) => { err += d.toString(); });
-  proc.once('close', (code) => {
-    if (code !== 0) reject(new Error(`${cmd} ${args[0] ?? ''} exited ${code}: ${err.slice(0, 500)}`));
-    else resolve(out.trim());
-  });
-  proc.once('error', reject);
-});
-
-/**
- * Ensure all output files are committed and pushed to the task GitHub repo,
- * and that sandboxRepoUrl is preserved in progress.json.
- * Non-fatal — logs errors but never throws, never fails the task.
- */
-const finalRepoSync = async () => {
-  if (!SANDBOX_REPO_URL || !GITHUB_TOKEN) return;
-  try {
-    // 1. Restore sandboxRepoUrl in progress.json if the agent stripped it
-    const cur = await safeReadJson(PROGRESS_PATH);
-    if (cur && !cur.sandboxRepoUrl) {
-      await writeFile(PROGRESS_PATH, JSON.stringify({ ...cur, sandboxRepoUrl: SANDBOX_REPO_URL }, null, 2), 'utf-8');
-      await appendClaudeLog('system', 'finalRepoSync: restored sandboxRepoUrl in progress.json');
-    }
-
-    // 2. Clone the task repo and push output files
-    const repoPath = SANDBOX_REPO_URL.replace('https://github.com/', '');
-    const authUrl = `https://${GITHUB_TOKEN}@github.com/${repoPath}.git`;
-    const CLONE_DIR = '/tmp/task-repo-sync';
-
-    await runCmd('git', ['clone', '--depth=1', authUrl, CLONE_DIR]).catch(async (cloneErr) => {
-      await appendClaudeLog('system', `finalRepoSync: clone failed (${cloneErr.message}), trying existing dir`);
-      await runCmd('git', ['-C', CLONE_DIR, 'remote', 'set-url', 'origin', authUrl]).catch(() => {});
-      await runCmd('git', ['-C', CLONE_DIR, 'pull', '--rebase']).catch(() => {});
-    });
-
-    await runCmd('git', ['-C', CLONE_DIR, 'config', 'user.email', 'sandbox@vibeguild.ai']).catch(() => {});
-    await runCmd('git', ['-C', CLONE_DIR, 'config', 'user.name', 'Vibe Guild Sandbox']).catch(() => {});
-
-    // Copy /workspace/output/* into output/ in the repo
-    const outputDir = '/workspace/output';
-    let outputFiles = [];
-    try { outputFiles = (await readdir(outputDir)).filter((f) => !f.startsWith('.')); } catch { /* empty */ }
-
-    if (outputFiles.length > 0) {
-      await mkdir(join(CLONE_DIR, 'output'), { recursive: true });
-      for (const file of outputFiles) {
-        await cp(join(outputDir, file), join(CLONE_DIR, 'output', file), { recursive: true, force: true }).catch(() => {});
-      }
-    }
-
-    // Commit and push
-    await runCmd('git', ['-C', CLONE_DIR, 'add', '-A']);
-    const dirty = await runCmd('git', ['-C', CLONE_DIR, 'status', '--porcelain']).catch(() => '');
-    if (dirty.trim()) {
-      await runCmd('git', ['-C', CLONE_DIR, 'commit', '-m',
-        `chore: final output sync\n\nTask: ${TASK_TITLE}\nTask ID: ${TASK_ID}`]);
-      await runCmd('git', ['-C', CLONE_DIR, 'push', 'origin', 'HEAD:main']).catch(
-        () => runCmd('git', ['-C', CLONE_DIR, 'push', 'origin', 'HEAD'])
-      );
-      await appendClaudeLog('system', `finalRepoSync: pushed ${outputFiles.length} output file(s) to ${SANDBOX_REPO_URL}`);
-      console.log(`[sandbox] finalRepoSync: synced output to ${SANDBOX_REPO_URL}`);
-    } else {
-      await appendClaudeLog('system', 'finalRepoSync: nothing new to push (repo already up to date)');
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    await appendClaudeLog('system', `finalRepoSync failed (non-fatal): ${msg}`).catch(() => {});
-    console.error('[sandbox] finalRepoSync failed:', msg);
-  }
-};
-
 const appendClaudeLog = async (stream, text) => {
   const ts = new Date().toISOString();
   await mkdir(LOGS_DIR, { recursive: true });
   await appendFile(CLAUDE_LOG_PATH, `[${ts}] [${stream}] ${text}\n`, 'utf-8');
-};
-
-const repoSlug = (text) =>
-  String(text ?? '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 40) || 'task';
-
-const taskRepoPrefix = () => `task-${repoSlug(TASK_TITLE)}`;
-const exactTaskRepoName = () => `${taskRepoPrefix()}-${TASK_ID.slice(0, 8)}`;
-
-const ghFetch = async (url, init = {}) => {
-  if (!GITHUB_TOKEN) throw new Error('VIBEGUILD_GITHUB_TOKEN is missing in sandbox env.');
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `token ${GITHUB_TOKEN}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-      ...(init.headers ?? {}),
-    },
-  });
-  return res;
-};
-
-const getRepoIfExists = async (owner, repo) => {
-  const res = await ghFetch(`https://api.github.com/repos/${owner}/${repo}`);
-  if (res.status === 404) return null;
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`GitHub read repo failed: ${res.status} — ${body}`);
-  }
-  return res.json();
-};
-
-const createRepo = async (ownerOrNull, name) => {
-  // GitHub repo description: strip control chars + backticks, collapse whitespace, max 350 chars
-  const safeDesc = `Vibe Guild task: ${TASK_TITLE}`
-    .replace(/[`\x00-\x1F\x7F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 350);
-  const body = {
-    name,
-    description: safeDesc,
-    private: true,
-    auto_init: true,
-  };
-  const url = ownerOrNull
-    ? `https://api.github.com/orgs/${ownerOrNull}/repos`
-    : 'https://api.github.com/user/repos';
-  const res = await ghFetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`GitHub create repo failed: ${res.status} — ${txt}`);
-  }
-  return res.json();
-};
-
-/**
- * Overwrite README.md in a freshly created repo with a structured initial template.
- * Uses the GitHub Contents API (PUT). Retries once after a short delay to handle
- * the brief window after auto_init where the default commit may not be ready.
- * @param {string} owner
- * @param {string} repo
- */
-const initRepoReadme = async (owner, repo) => {
-  const readmeContent = [
-    `# ${repo}`,
-    ``,
-    `**Vibe Guild** execution workspace for task \`${TASK_ID}\`.`,
-    ``,
-    `## Task`,
-    ``,
-    `${TASK_TITLE}`,
-    ``,
-    `### Description`,
-    ``,
-    `${TASK_DESCRIPTION || '_No additional description provided._'}`,
-    ``,
-    `## Results`,
-    ``,
-    `_Results will be added here when the task completes._`,
-    ``,
-    `---`,
-    ``,
-    `- **Task ID:** \`${TASK_ID}\``,
-    `- **Started:** ${new Date().toISOString()}`,
-
-  ].join('\n');
-
-  const encoded = Buffer.from(readmeContent, 'utf-8').toString('base64');
-
-  // Fetch the current SHA of README.md (needed for the PUT)
-  const getSha = async () => {
-    const res = await ghFetch(`https://api.github.com/repos/${owner}/${repo}/contents/README.md`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data?.sha ?? null;
-  };
-
-  const put = async (sha) => {
-    const body = {
-      message: 'chore: initialize README with task context',
-      content: encoded,
-      ...(sha ? { sha } : {}),
-    };
-    const res = await ghFetch(`https://api.github.com/repos/${owner}/${repo}/contents/README.md`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const txt = await res.text();
-      throw new Error(`README init failed: ${res.status} — ${txt}`);
-    }
-  };
-
-  // Retry once: auto_init commit may not be visible immediately
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      if (attempt > 1) await new Promise((r) => setTimeout(r, 3000));
-      const sha = await getSha();
-      await put(sha);
-      await appendClaudeLog('system', `README.md initialised for ${owner}/${repo}`);
-      return;
-    } catch (err) {
-      if (attempt === 2) {
-        await appendClaudeLog('system', `README init warning (non-fatal): ${err?.message ?? err}`);
-      }
-    }
-  }
-};
-
-const resolveSandboxRepo = async () => {
-  const exactName = exactTaskRepoName();
-  await appendClaudeLog('system', `Resolving task repo by exact name: ${exactName}`);
-
-  // Only reuse a repo when the exact name matches (includes task ID suffix).
-  // Never reuse by prefix alone — two tasks with similar titles would share the same repo.
-  const exact = await getRepoIfExists(GITHUB_OWNER, exactName).catch(() => null);
-  if (exact?.html_url) {
-    SANDBOX_REPO_URL = exact.html_url;
-    await appendClaudeLog('system', `Resolved existing exact repo: ${SANDBOX_REPO_URL}`);
-    return SANDBOX_REPO_URL;
-  }
-
-  try {
-    const created = await createRepo(GITHUB_OWNER, exactName);
-    SANDBOX_REPO_URL = String(created?.html_url ?? '');
-    if (SANDBOX_REPO_URL) {
-      await appendClaudeLog('system', `Created org repo: ${SANDBOX_REPO_URL}`);
-      await initRepoReadme(GITHUB_OWNER, exactName).catch(() => undefined);
-      return SANDBOX_REPO_URL;
-    }
-  } catch (err) {
-    // Org-scoped fine-grained PATs cannot create user repos — surface the real error
-    throw new Error(`GitHub create repo failed: ${err?.message ?? err}`);
-  }
-
-  throw new Error('GitHub repo creation succeeded but html_url is empty.');
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -322,6 +74,16 @@ const safeReadJson = async (p) => {
 };
 
 /**
+ * @param {'in-progress'|'completed'|'failed'|'blocked'|'waiting_for_human'} status
+ * @returns {'not_started'|'in_progress'|'temp_done'|'fully_done'}
+ */
+const statusToCompletionLevel = (status) => {
+  if (status === 'completed') return 'fully_done';
+  if (status === 'failed') return 'temp_done';
+  return 'in_progress';
+};
+
+/**
  * @param {'in-progress'|'completed'|'failed'|'blocked'} status
  * @param {string} summary
  * @param {number} percent
@@ -344,13 +106,17 @@ const writeProgress = async (status, summary, percent, extra = {}) => {
   const payload = {
     ...(current && typeof current === 'object' ? current : {}),
     taskId: TASK_ID,
+    taskKind: TASK_KIND,
+    leadRole: TASK_LEAD_ROLE,
+    sandboxWorkspacePath: TASK_WORKSPACE_HOST_PATH,
+    sandboxWorkspaceMountPath: TASK_WORKSPACE_DIR,
+    completionLevel: statusToCompletionLevel(status),
     worldDay,
     reportedAt: new Date().toISOString(),
     status,
     summary,
     percentComplete: percent,
     checkpoints,
-    ...(SANDBOX_REPO_URL ? { sandboxRepoUrl: SANDBOX_REPO_URL } : {}),
     ...extraFields,
   };
 
@@ -416,6 +182,7 @@ const buildPrompt = () => {
     `   File: world/tasks/${TASK_ID}/progress.json`,
     `   Schema: { taskId, worldDay (read from world/memory/world.json), reportedAt,`,
     `             status ("in-progress"|"completed"|"failed"|"waiting_for_human"), summary,`,
+    `             completionLevel ("not_started"|"in_progress"|"temp_done"|"fully_done"),`,
     `             percentComplete (0-100), checkpoints: [{at, description}], artifacts?: {},`,
     `             question?: string (only when status is "waiting_for_human") }`,
     `   IMPORTANT: Update progress.json after each meaningful action so the human operator`,
@@ -427,6 +194,9 @@ const buildPrompt = () => {
     `### Shared skills`,
     `Before starting, read any skill files in world/shared/skills/ (if the directory exists).`,
     `These are operator-authored best practices for this world — follow them throughout the task.`,
+    `Also check FeatBit Claude marketplace skills at:`,
+    `/home/sandbox/.claude/plugins/marketplaces/featbit-marketplace/skills`,
+    `if that directory exists in this sandbox.`,
     ``,
     `### Human Alignment Protocol (use sparingly, only for consequential blockers)`,
     `If you are uncertain about a decision that is CONSEQUENTIAL and you cannot proceed without`,
@@ -443,37 +213,14 @@ const buildPrompt = () => {
     `- Questions you could answer yourself with a bit of research.`,
   ];
 
-  if (SANDBOX_REPO_URL) {
-    lines.push(
-      ``,
-      `**Execution repo:** ${SANDBOX_REPO_URL}`,
-      ``,
-      `This GitHub repo IS the persistent workspace for this task. All important intermediate`,
-      `and final results MUST be committed and pushed here — not only at the end, but`,
-      `continuously throughout execution after each meaningful milestone.`,
-      ``,
-      `Why this matters: future task runs and Docker sandbox resumes start from this repo.`,
-      `If an important result only exists in /workspace/output/ but NOT in the repo, it will`,
-      `be lost on container restart. The repo is the authoritative external memory.`,
-      ``,
-      `### Repo sync requirements (MANDATORY)`,
-      `1. Clone or set up the repo in /workspace at the start of execution.`,
-      `2. After every significant deliverable (draft, analysis, fetched data, etc.), commit`,
-      `   and push it to the repo. Do NOT wait until the task is fully done.`,
-      `3. At task completion, update README.md in the repo root:`,
-      `   - Add a "# Results" section (or update if it exists) summarising what was produced.`,
-      `   - List all output artifacts with their file paths and a one-line description.`,
-      `   - Include key findings, links, or URLs that were generated.`,
-      `   Commit and push the updated README.md as the final action before writing "completed".`,
-      `4. Keep a runtime-details folder synced: ${TASK_DETAIL_DIR}/`,
-      `   Required files in ${TASK_DETAIL_DIR}/:`,
-      `     - claude-code.log (raw runtime log excerpts)`,
-      `     - progress-snapshots.ndjson (append each milestone snapshot)`,
-      `     - artifacts-manifest.md (what was produced and where)`,
-      `   Sync this folder repeatedly during execution.`,
-      `5. Also mirror logs from world/tasks/${TASK_ID}/logs/ when relevant.`,
-    );
-  }
+  lines.push(
+    ``,
+    `### Persistent task workspace`,
+    `Use this directory as your persistent workspace for all task files:`,
+    `${TASK_WORKSPACE_DIR}`,
+    `Everything inside it is mounted from host path: ${TASK_WORKSPACE_HOST_PATH}/`,
+    `and survives container restarts. Keep key outputs there.`,
+  );
 
   return lines.join('\n');
 };
@@ -729,6 +476,45 @@ const buildResumePrompt = (humanAnswer, prevProgress, history) => {
 const MAX_ALIGNMENT_ROUNDS = 20;
 const MAX_NOOP_RETRY = 1;
 const ALIGNMENT_RESUME_TIMEOUT_MS = 5 * 60 * 1000;
+const PLAN_ALIGNMENT_TIMEOUT_MS = 30 * 60 * 1000;
+const PLAN_ALIGNMENT_MAX_ROUNDS = 10;
+
+const isProceedInstruction = (text) => {
+  const value = String(text ?? '').toLowerCase();
+  return /\b(proceed|go ahead|start|approved|approve|looks good|yes|ok|continue|run it|ship it)\b/.test(value)
+    || /[同意通过批准开始执行继续可以]/.test(value);
+};
+
+const buildPlanningPrompt = (basePrompt, initialOperatorBlock, feedback = null, previousPlan = null) => {
+  const planSection = [
+    basePrompt,
+    ...(initialOperatorBlock ? ['', initialOperatorBlock] : []),
+    '',
+    '--- MANDATORY PREFLIGHT PLAN ALIGNMENT ---',
+    'Before executing any implementation action, you MUST provide a plan and wait for operator approval.',
+    'Do NOT execute the task yet. Do NOT produce final artifacts yet.',
+    'Write progress.json with status="waiting_for_human" and include your plan in the question field.',
+    'Your plan must include:',
+    '- Objective restatement',
+    '- Step-by-step execution plan (3-7 bullets)',
+    '- Validation checklist',
+    '- Expected final outputs',
+    '',
+    'End with: "Shall I proceed with this plan?"',
+  ];
+
+  if (previousPlan || feedback) {
+    planSection.push(
+      '',
+      '--- OPERATOR FEEDBACK ON PLAN ---',
+      ...(previousPlan ? [`Previous plan summary:\n${previousPlan}`] : []),
+      ...(feedback ? [`Operator feedback:\n${feedback}`] : []),
+      'Revise your plan accordingly and write waiting_for_human again. Do not execute the task yet.',
+    );
+  }
+
+  return planSection.join('\n');
+};
 
 const run = async () => {
   if (!TASK_ID) {
@@ -736,24 +522,8 @@ const run = async () => {
     process.exit(1);
   }
 
-  if (!GITHUB_TOKEN) {
-    const reason = 'VIBEGUILD_GITHUB_TOKEN is required in sandbox for task repo resolution.';
-    await writeProgress('failed', reason, 0, { checkpointDescription: 'Sandbox startup failed: missing GitHub token' });
-    await appendClaudeLog('system', reason);
-    console.error(`[sandbox] ${reason}`);
-    process.exit(1);
-  }
-
   console.log(`[sandbox] Starting task ${TASK_ID.slice(0, 8)}: ${TASK_TITLE}`);
-  try {
-    await resolveSandboxRepo();
-  } catch (err) {
-    const reason = `Task repo resolution failed: ${err?.message ?? err}`;
-    await writeProgress('failed', reason, 0, { checkpointDescription: 'Sandbox startup failed: repo resolution failed' });
-    await appendClaudeLog('system', reason);
-    console.error(`[sandbox] ${reason}`);
-    process.exit(1);
-  }
+  await mkdir(TASK_WORKSPACE_DIR, { recursive: true });
 
   await writeProgress('in-progress', 'Sandbox agent starting…', 0, {
     checkpointDescription: 'Sandbox run started',
@@ -765,9 +535,82 @@ const run = async () => {
   // Check for any messages already in inbox before launching claude
   const initialMsgs = await drainInbox();
   const basePrompt = buildPrompt();
-  const firstPrompt = initialMsgs.length > 0
-    ? `${basePrompt}\n\n--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
-    : basePrompt;
+  const initialOperatorBlock = initialMsgs.length > 0
+    ? `--- INITIAL INSTRUCTIONS FROM OPERATOR ---\n${initialMsgs.map((m) => `> ${m}`).join('\n')}\n---`
+    : '';
+
+  // ── Mandatory preflight plan alignment ─────────────────────────────────
+  let planningPrompt = buildPlanningPrompt(basePrompt, initialOperatorBlock);
+  let approvedPlan = null;
+
+  for (let round = 0; round < PLAN_ALIGNMENT_MAX_ROUNDS; round++) {
+    const planResult = await runClaudeInterruptible(planningPrompt, mcpConfigPath);
+
+    if (planResult === 'paused') {
+      const pausedProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
+      const pauseMsgs = await drainInbox();
+      const pauseContext = pauseMsgs.length > 0 ? pauseMsgs.join(' ') : 'Creator requested alignment via /pause --task';
+      await writeProgress(
+        'waiting_for_human',
+        'Paused by creator during preflight plan alignment',
+        pausedProgress?.percentComplete ?? 0,
+        { question: pauseContext },
+      );
+    }
+
+    const planProgress = await safeReadJson(join(TASK_DIR, 'progress.json'));
+    if (!planProgress || planProgress.status !== 'waiting_for_human') {
+      const reason = 'Preflight plan alignment failed: agent did not enter waiting_for_human with a plan.';
+      await writeProgress('failed', reason, Number(planProgress?.percentComplete ?? 0), {
+        checkpointDescription: 'Mandatory preflight plan alignment failed',
+      });
+      console.error(`[sandbox] ${reason}`);
+      process.exit(1);
+    }
+
+    const planQuestion = String(planProgress.question ?? planProgress.summary ?? '');
+    console.log(`[sandbox] Waiting for operator plan approval (round ${round + 1}/${PLAN_ALIGNMENT_MAX_ROUNDS})…`);
+
+    const answer = await waitForInboxResponse(PLAN_ALIGNMENT_TIMEOUT_MS);
+    if (!answer) {
+      const reason = 'Timed out waiting for operator plan approval.';
+      await writeProgress('failed', reason, Number(planProgress.percentComplete ?? 0), {
+        checkpointDescription: 'Mandatory preflight plan alignment timed out',
+      });
+      console.error(`[sandbox] ${reason}`);
+      process.exit(1);
+    }
+
+    if (isProceedInstruction(answer)) {
+      approvedPlan = {
+        question: planQuestion,
+        answer,
+      };
+      break;
+    }
+
+    planningPrompt = buildPlanningPrompt(basePrompt, initialOperatorBlock, answer, planQuestion);
+  }
+
+  if (!approvedPlan) {
+    const reason = 'Preflight plan alignment exceeded maximum rounds without operator approval.';
+    await writeProgress('failed', reason, 0, {
+      checkpointDescription: 'Mandatory preflight plan alignment exhausted',
+    });
+    console.error(`[sandbox] ${reason}`);
+    process.exit(1);
+  }
+
+  const firstPrompt = [
+    basePrompt,
+    ...(initialOperatorBlock ? ['', initialOperatorBlock] : []),
+    '',
+    '--- APPROVED PLAN (MANDATORY BASELINE) ---',
+    approvedPlan.question,
+    '',
+    `Operator approval: "${approvedPlan.answer}"`,
+    'You are now approved to execute. Follow the approved plan unless the operator sends new guidance.',
+  ].join('\n');
 
   /** @type {'done' | 'paused'} */
   let runResult = await runClaudeInterruptible(firstPrompt, mcpConfigPath);
@@ -894,7 +737,6 @@ const run = async () => {
   }
 
   if (current.status === 'completed') {
-    await finalRepoSync();
     console.log(`[sandbox] Task ${TASK_ID.slice(0, 8)} done.`);
     return;
   }
@@ -959,7 +801,6 @@ const run = async () => {
   await writeProgress('completed', 'Sandbox agent finished execution.', 100, {
     checkpointDescription: 'Sandbox run finished',
   });
-  await finalRepoSync();
 
   console.log(`[sandbox] Task ${TASK_ID.slice(0, 8)} done.`);
 };

@@ -14,6 +14,14 @@ export type AdapterState = 'idle' | 'running' | 'paused' | 'completed' | 'failed
 export type SyncedProgress = {
   taskId: string;
   leaderId?: string;  // legacy field — no longer required
+  taskKind?:
+    | 'demo'
+    | 'dev_insight_blog'
+    | 'learning_note'
+    | 'issue_feedback'
+    | 'skill_validation'
+    | 'skill_demo_trigger';
+  completionLevel?: 'not_started' | 'in_progress' | 'temp_done' | 'fully_done';
   worldDay: number;
   reportedAt: string;
   /**
@@ -26,6 +34,8 @@ export type SyncedProgress = {
   checkpoints: Array<{ at: string; sessionId?: string; description: string }>;
   blockers?: string[];
   escalations?: string[];
+  sandboxWorkspacePath?: string;
+  /** GitHub repo URL created by the sandbox agent for this task. */
   sandboxRepoUrl?: string;
   /** Present when status is 'waiting_for_human' — describes the specific question/decision */
   question?: string;

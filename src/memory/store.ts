@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
@@ -6,6 +6,9 @@ import type {
   DailyRecord,
   WorldSignal,
   Escalation,
+  TeamManifest,
+  AlignmentEvent,
+  TeamRole,
 } from './types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -19,6 +22,8 @@ const paths = {
   escalations: join(ROOT, 'reports', 'escalations.json'),
   taskProgress: (taskId: string) =>
     join(ROOT, 'tasks', taskId, 'progress.json'),
+  teamManifest: join(ROOT, 'teams', 'active.json'),
+  alignmentLog: (taskId: string) => join(ROOT, 'alignment', taskId, 'history.ndjson'),
 } as const;
 
 const ensureDir = async (filePath: string): Promise<void> => {
@@ -171,6 +176,58 @@ export const appendEscalation = async (escalation: Escalation): Promise<void> =>
 
 export const readEscalations = (): Promise<Escalation[]> =>
   readJson<Escalation[]>(paths.escalations, []);
+
+// --- Team Manifest ---
+
+const DEFAULT_ROLES: TeamRole[] = [
+  'TeamLead',
+  'Builder',
+  'Verifier',
+  'NarrativeEngineer',
+  'OperatorLiaison',
+];
+
+const defaultTeamManifest = (): TeamManifest => {
+  const now = new Date().toISOString();
+  return {
+    teamId: 'featbit-ai-team',
+    name: 'FeatBit AI Delivery Team',
+    leadRole: 'TeamLead',
+    roles: [...DEFAULT_ROLES],
+    roleAgents: {
+      TeamLead: 'team-lead-agent',
+      Builder: 'builder-agent',
+      Verifier: 'verifier-agent',
+      NarrativeEngineer: 'narrative-engineer-agent',
+      OperatorLiaison: 'operator-liaison-agent',
+    },
+    initializedAt: now,
+    updatedAt: now,
+  };
+};
+
+export const readTeamManifest = async (): Promise<TeamManifest | null> =>
+  readJson<TeamManifest | null>(paths.teamManifest, null);
+
+export const writeTeamManifest = async (manifest: TeamManifest): Promise<void> => {
+  await writeJson(paths.teamManifest, { ...manifest, updatedAt: new Date().toISOString() });
+};
+
+export const ensureTeamManifest = async (): Promise<TeamManifest> => {
+  const existing = await readTeamManifest();
+  if (existing) return existing;
+  const initial = defaultTeamManifest();
+  await writeTeamManifest(initial);
+  return initial;
+};
+
+// --- Alignment History ---
+
+export const appendAlignmentEvent = async (event: AlignmentEvent): Promise<void> => {
+  const filePath = paths.alignmentLog(event.taskId);
+  await ensureDir(filePath);
+  await appendFile(filePath, `${JSON.stringify(event)}\n`, 'utf-8');
+};
 
 // --- Task Sessions (per-task session for resumption after rest/freeze) ---
 

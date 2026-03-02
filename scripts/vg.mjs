@@ -63,12 +63,18 @@ const ageMin = (isoDate) => {
 const queue       = safeReadJson(join(root, 'world', 'tasks', 'queue.json'), []);
 const world       = safeReadJson(join(root, 'world', 'memory', 'world.json'), {});
 const escalations = safeReadJson(join(root, 'world', 'reports', 'escalations.json'), []);
+const team        = safeReadJson(join(root, 'world', 'teams', 'active.json'), null);
 
 // ─── commands ─────────────────────────────────────────────────────────────────
 
 if (command === 'overview') {
   const statusCounts = countBy(queue, 'status');
   const statusLine = [...statusCounts.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([s, n]) => `${s}:${n}`)
+    .join('  ');
+  const completionCounts = countBy(queue, 'completionLevel');
+  const completionLine = [...completionCounts.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([s, n]) => `${s}:${n}`)
     .join('  ');
@@ -80,8 +86,10 @@ if (command === 'overview') {
   console.log(`startedAt       : ${fmt(world?.startedAt)}`);
   console.log(`lastDayEndedAt  : ${fmt(world?.lastDayEndedAt)}`);
   console.log(`beings          : ${Array.isArray(world?.beings) ? world.beings.join(', ') : '-'}`);
+  console.log(`team            : ${team?.name ?? '-'}${team?.leadRole ? ` (lead:${team.leadRole})` : ''}`);
   console.log(`tasks total     : ${queue.length}`);
   console.log(`task statuses   : ${statusLine || '-'}`);
+  console.log(`completion lvl  : ${completionLine || '-'}`);
   console.log(`escalations     : ${escalations.length}`);
 
   // Show in-progress task ages to help the operator spot stalled work
@@ -91,7 +99,7 @@ if (command === 'overview') {
     for (const t of active) {
       const id   = String(t?.id ?? '-').slice(0, 8);
       const age  = ageMin(t?.createdAt);
-      const mode = t?.sandboxRepoUrl ? ` [docker repo: ${t.sandboxRepoUrl}]` : '';
+      const mode = t?.sandboxWorkspacePath ? ` [workspace: ${t.sandboxWorkspacePath}]` : '';
       console.log(`  ${id}  age:${age.padEnd(6)}  ${truncate(t?.title, 50)}${mode}`);
     }
   }
@@ -115,12 +123,15 @@ if (command === 'tasks') {
   for (const t of rows) {
     const id       = String(t?.id ?? '-').slice(0, 8);
     const status   = String(t?.status ?? '-').padEnd(10);
+    const level    = String(t?.completionLevel ?? '-').padEnd(10);
     const priority = String(t?.priority ?? '-').padEnd(8);
     const age      = ageMin(t?.createdAt).padEnd(6);
     const leader   = t?.leaderId ? ` leader:${t.leaderId}` : '';
-    const sandbox  = t?.sandboxRepoUrl ? ' [docker]' : '';
+    const roleLead = t?.leadRole ? ` role:${t.leadRole}` : '';
+    const kind     = t?.taskKind ? ` kind:${t.taskKind}` : '';
+    const sandbox  = t?.sandboxWorkspacePath ? ' [docker]' : '';
     const title    = truncate(t?.title, 52);
-    console.log(`${id}  [${status}|${priority}| age:${age}]${leader}${sandbox}  ${title}`);
+    console.log(`${id}  [${status}|${priority}|${level}| age:${age}]${leader}${roleLead}${kind}${sandbox}  ${title}`);
   }
   process.exit(0);
 }
@@ -144,6 +155,9 @@ if (command === 'progress') {
   console.log(`taskId   : ${taskId}`);
   console.log(`title    : ${truncate(task?.title, 72)}`);
   console.log(`status   : ${task?.status ?? '-'}`);
+  console.log(`level    : ${task?.completionLevel ?? '-'}`);
+  console.log(`kind     : ${task?.taskKind ?? '-'}`);
+  console.log(`leadRole : ${task?.leadRole ?? '-'}`);
   console.log(`priority : ${task?.priority ?? '-'}`);
 
   if (!existsSync(progressPath)) {
@@ -162,7 +176,7 @@ if (command === 'progress') {
   console.log(`percent  : ${p?.percentComplete ?? '-'}`);
   console.log(`summary  : ${truncate(p?.summary, 80)}`);
   console.log(`reported : ${fmt(p?.reportedAt)}`);
-  if (task?.sandboxRepoUrl) console.log(`repo     : ${task.sandboxRepoUrl}`);
+  if (task?.sandboxWorkspacePath) console.log(`workspace: ${task.sandboxWorkspacePath}`);
   if (task?.sandboxContainerId) console.log(`ctnr     : ${task.sandboxContainerId.slice(0, 12)}`);
 
   if (checkpoints.length > 0) {
@@ -249,7 +263,7 @@ if (command === 'help') {
     '  /done                      End alignment conversation. Leader resumes the task.',
     '  /task <description>        Quickly add a new task to the queue.',
     '  /revise <id> <feedback>    Re-run a completed/failed task with creator feedback.',
-    '                              Sandbox re-opens with the original team + repo + conversation history.',
+    '                              Sandbox re-opens with the original team + workspace + conversation history.',
     '                              Feedback is injected as opening instructions so the leader sees it first.',
     '',
     'World configuration (run in a separate terminal):',

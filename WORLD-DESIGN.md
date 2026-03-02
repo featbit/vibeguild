@@ -1,647 +1,246 @@
-# LP;HU — Architecture
+# LP;HU — World Design (Current Baseline)
 
-## What It Is
+## Purpose
 
-LP;HU is a task execution framework that accepts tasks, runs them in isolated sandbox
-containers, and keeps the operator in control with real-time visibility and intervention.
+LP;HU is an always-on AI team execution system for FeatBit.
 
-Each task runs as an independent Claude CLI process inside a Docker container. The operator
-can pause at any moment, inject instructions, and resume. Execution truth lives in the
-GitHub repo; operator-facing truth lives in `world/`.
+Its practical loop is:
 
-Supported task types:
-- content and research tasks
-- coding and debugging tasks
-- multi-step tasks that depend on outputs from prior tasks
+- trigger demos from skills,
+- validate skills through demo execution,
+- generate best-practice outputs.
+
+The system is human-in-the-loop first: autonomous execution is default, but operator intervention is always available.
 
 ---
 
-## Core Design Principles
+## Core Principles
 
-1. **Operator sovereignty first**
-   - The operator can pause, resume, and inject instructions at any time.
-   - Operator visibility must not depend on reading low-level execution files.
+1. **Utility over polish**
+   - Optimize for shipping useful outcomes now.
+   - Avoid speculative architecture.
 
-2. **Two-plane architecture**
-   - **Control Plane (Host):** task scheduling, lifecycle state, intervention, world memory.
-   - **Execution Plane (Sandbox):** one Docker container per task; Claude CLI runs inside.
+2. **Team, not single-agent roleplay**
+   - Tasks are owned by an explicit AI team model.
+   - Each role has one primary responsibility plus at least one secondary responsibility.
 
-3. **Dual truth model**
-   - **Execution truth:** GitHub repo + runtime artifacts — all intermediate and final results
-     committed continuously. Survives container restarts; the recovery anchor for resuming tasks.
-   - **Operator truth:** `world/` summaries and metadata — concise, decision-ready.
+3. **Execution truth is local workspace**
+  - Persistence anchor is category folders under `world/` (for example `world/demos/`, `world/examples/`, `world/insights/`).
+  - Task metadata stores a pointer path (`sandboxWorkspacePath`) to the actual workspace location.
+   - No per-task GitHub repo dependency in baseline runtime.
 
-4. **Capability evolution through SKILLs**
-   - Capabilities are updated by editing SKILL files and re-running the coding agent.
-   - No runtime self-learning. No over-engineering for future model capabilities.
+4. **Operator sovereignty**
+   - Pause, inject, revise, resume at any time.
+   - Alignment history is durable and queryable.
+
+5. **Compatibility-first evolution**
+   - Keep existing queue/progress contracts usable while adding richer semantics.
 
 ---
 
-## Runtime Model
+## Team Model (T-shaped)
 
-### High-Level Architecture (ASCII)
+Default team is persisted at `world/teams/active.json`.
 
-```text
-                    +------------------------------------+
-                    |     Operator Console               |
-                    |  (vg CLI · pause · inject msg)     |
-                    +------------------+-----------------+
-                                       |
-                                       v
-+--------------------------------------------------------------------------+
-|                     Control Plane  (Host Process)                        |
-|                                                                          |
-|   Scheduler (5 s tick)                                                  |
-|   · start runners for queued tasks                                      |
-|   · detect completed / failed runners                                   |
-|   · drain signals (pause, inject…)                                      |
-|                                                                          |
-|   chokidar ──────── watches world/tasks/*/progress.json ──────────────► |
-|                     fires onProgress → operator console                 |
-|                                                  │                       |
-|   operator console ─── /msg --task <id> <text> ──►  inbox.json (rw)  ──►|
-|                     inject message mid-execution    sandbox reads next  |
-+──────────────────────────────┬───────────────────────────────────────────+
-                               │  one sandbox per task
-                               │  (multiple tasks → multiple sandboxes in parallel)
-              ┌────────────────┼────────────────┐
-              │                │                │
-              ▼                ▼                ▼
-   +─────────────────+ +─────────────────+ +─────────────────+
-   │ Sandbox task A  │ │ Sandbox task B  │ │ Sandbox task C  │  (Docker containers)
-   │                 │ │                 │ │                 │
-   │  claude CLI     │ │  claude CLI     │ │  claude CLI     │
-   │  (one process)  │ │  (one process)  │ │  (one process)  │
-   │                 │ │                 │ │                 │
-   │  Mounts (rw):   │ │  Mounts (rw):   │ │  Mounts (rw):   │
-   │  tasks/{id}/    │ │  tasks/{id}/    │ │  tasks/{id}/    │
-   │  output/        │ │  output/        │ │  output/        │
-   │  Mounts (ro):   │ │  Mounts (ro):   │ │  Mounts (ro):   │
-   │  world.json     │ │  world.json     │ │  world.json     │
-   │  shared/        │ │  shared/        │ │  shared/        │
-   │  AGENTS.md      │ │  AGENTS.md      │ │  AGENTS.md      │
-   │  entrypoint.mjs │ │  entrypoint.mjs │ │  entrypoint.mjs │
-   +────────┬────────+ +────────┬────────+ +────────┬────────+
-            │                   │                   │
-            └───────────────────┴───────────────────┘
-                                │
-                                ▼
-                    +────────────────────────+
-                    │   GitHub / External    │
-                    │   APIs & Repos         │
-                    +────────────────────────+
-```
+Roles:
 
-### Control Plane (Host)
+- `TeamLead`
+  - Primary: planning integration, trade-off decisions, final direction.
+  - Secondary: unblock any role when needed.
+- `Builder`
+  - Primary: implementation and task delivery.
+  - Secondary: assist verification and demo wiring.
+- `Verifier`
+  - Primary: validation, test strategy, quality gates.
+  - Secondary: risk notes and rollback guidance.
+- `NarrativeEngineer`
+  - Primary: developer narrative, blog/case writing, explainability.
+  - Secondary: convert implementation artifacts into reusable teaching assets.
+- `OperatorLiaison`
+  - Primary: alignment protocol, summaries, decision-ready reporting.
+  - Secondary: maintain continuity across revisions and escalations.
+
+Design intent: focused ownership without isolated silos.
+
+---
+
+## Task Model
+
+### Runtime status (control-plane)
+
+- `pending`
+- `assigned`
+- `in-progress`
+- `blocked`
+- `completed`
+- `failed`
+- `escalated`
+
+### Delivery semantic status (`completionLevel`)
+
+- `not_started`
+- `in_progress`
+- `temp_done`
+- `fully_done`
+
+### Task taxonomy (`taskKind`)
+
+- `demo`
+- `dev_insight_blog`
+- `learning_note`
+- `issue_feedback`
+- `skill_validation`
+- `skill_demo_trigger`
+
+---
+
+## Runtime Architecture
+
+### Control Plane (host)
 
 Responsibilities:
-- task queue management and lifecycle state
-- starting / monitoring sandbox runners
-- crash recovery: on restart, any `in-progress` task in queue.json is re-launched
-  (`docker rm -f` first to avoid container name conflicts)
-- escalation handling and operator intervention
-- syncing task summaries into `world/`
 
-**Discord fast-path:** When a task is created via Discord, the system directly assigns and
-starts the runner without waiting for a scheduler tick. This eliminates the 30–60 s queue
-delay for interactive Discord tasks.
+- scheduler tick loop (every 5 s),
+- task lifecycle transitions,
+- runner start/monitor/recovery,
+- signal dispatch and cron scheduling.
 
-### Execution Plane (Sandbox)
+**Operator interface — three modes:**
 
-Each task gets exactly **one Docker container** with one `claude` CLI process.
+| Mode | How | Best for |
+|------|-----|----------|
+| **Docker sandbox** | `npm start` → scheduler auto-starts containers | Long-running, isolated, automated |
+| **Copilot Background** | `copilot` CLI (local background session) | Interactive, real-time collab |
+| **Copilot Cloud** | `/delegate` inside Copilot CLI | Async, tangential, creates a PR |
+- Copilot CLI command intake,
+- Copilot SDK command execution,
+- human alignment orchestration,
+- world memory synchronization.
 
-```text
-Docker container
-  └─ claude CLI
-       · executes the full task
-       · writes progress.json checkpoints after every meaningful step
-       · commits intermediate and final results to GitHub repo continuously
-```
+Key files:
 
-Sandbox responsibilities:
-- execute the task end-to-end
-- write `progress.json` checkpoints continuously
-- commit all deliverables to the GitHub task repo
-- call external APIs (GitHub, web, MCP servers) to produce results
+- `src/world.ts`
+- `src/tasks/queue.ts`
+- `src/tasks/runner.ts`
 
----
+### Execution Plane (docker)
 
-## Data and State Layers
+One task = one container.
 
-### State Layer Graph (ASCII)
+Mounted task workspace:
 
-```text
-         execution details (deep)
-   +---------------------------------------------+
-   | Execution Artifacts                          |
-   | - GitHub repo: ALL results committed         |
-   |   continuously; README.md updated at end     |
-   | - output/{taskId}/  deliverables (local)     |
-   | - world/tasks/{taskId}/progress.json         |
-   +----------------------+----------------------+
-                 |
-                 | sync contract
-                 v
-   +---------------------------------------------+
-   | world/ (operator-facing, intervention-ready) |
-   | - world/tasks/queue.json                     |
-   | - world/tasks/{taskId}/progress.json         |
-   | - world/reports/escalations.json             |
-   +----------------------+----------------------+
-                 |
-                 | consumed by
-                 v
-   +---------------------------------------------+
-   | Operator decisions + future tasks            |
-   | (cross-task continuity and reuse)            |
-   +---------------------------------------------+
-```
+- host: `world/{demos|examples|insights}/<taskFolder>/`
+- container: `/workspace/task-workspace`
 
-### Operator-facing state (`world/`)
+Other mounts keep task isolation and world sync contracts.
 
-- `world/tasks/queue.json` — task queue and lifecycle state
-- `world/tasks/{taskId}/progress.json` — real-time progress and checkpoints
-- `world/reports/escalations.json` — escalations needing operator attention
-- `world/memory/world.json` — global world metadata
+Key files:
 
-Goals: concise, decision-ready, easy to read for both humans and future tasks.
-
-### Execution-facing state (GitHub + output/)
-
-- source changes, tests, logs
-- task-specific status and checkpoints
-- reproducible recovery anchors
-
-The operator may inspect this level when needed but daily operations should not depend on it.
+- `src/runtime/docker.ts`
+- `src/sandbox/entrypoint.mjs`
 
 ---
 
-## Sandbox Isolation
+## Data Layout
 
-Isolation is enforced through **precise Docker volume mounts** — not prompt constraints.
+### Operator-facing state
 
-### Volume Mount Map
+- `world/tasks/queue.json` — task registry and lifecycle
+- `world/tasks/<taskId>/progress.json` — latest execution snapshot + checkpoints
+- `world/alignment/<taskId>/history.ndjson` — durable HITL conversation events
+- `world/teams/active.json` — current team manifest
+- `world/reports/escalations.json` — escalations
+- `world/memory/world.json` — world metadata
 
-```text
-Host path                                    Container path                          Mode
-────────────────────────────────────────────────────────────────────────────────────────
-world/memory/world.json                  →   /workspace/world/memory/world.json      :ro
-world/tasks/{taskId}/                    →   /workspace/world/tasks/{taskId}/         :rw
-world/tasks/{taskId}/claude-home/         →   /home/sandbox/.claude/                   :rw
-world/shared/                            →   /workspace/world/shared/                 :ro
-output/{taskId}/                         →   /workspace/output/                       :rw
-src/sandbox/entrypoint.mjs              →   /workspace/src/sandbox/entrypoint.mjs   :ro
-src/sandbox/mcp-servers.mjs             →   /workspace/src/sandbox/mcp-servers.mjs  :ro
-AGENTS.md                                →   /workspace/AGENTS.md                    :ro
-```
+### Task execution state
 
-### What the container CAN and CANNOT do
-
-| Action | Allowed? | Reason |
-|--------|----------|--------|
-| Write progress.json for its task | ✅ | `/workspace/world/tasks/{taskId}/` is rw |
-| Write task outputs / deliverables | ✅ | `output/{taskId}/` → `/workspace/output/` :rw; isolated per task |
-| Persist Claude conversation history | ✅ | `world/tasks/{taskId}/claude-home/` → `/home/sandbox/.claude/` :rw |
-| Read dayCount from world.json | ✅ | `/workspace/world/memory/world.json` is ro |
-| Read world-shared skills and MCP config | ✅ | `/workspace/world/shared/` is ro |
-| Call tools / MCP servers | ✅ | World-shared tools injected at startup via `--mcp-config` |
-| Read or write another task's progress | ❌ | That task dir is not mounted |
-| Modify source code | ❌ | `src/` is not mounted (only entrypoint.mjs ro) |
-| Read world queue / task list | ❌ | `world/tasks/queue.json` is not mounted |
-
-### MCP Servers and Shared Skills
-
-Two separate MCP registries:
-
-| Registry | Used by | Managed via |
-|---|---|---|
-| `world/shared/mcp-servers.json` | Task sandbox (Claude CLI in Docker) | `npm run setup` |
-| `.claude/mcp-servers.json` | Discord bot (SDK session) | Edit file directly |
-| `world/shared/skills/` | Task sandbox (read at task start) | `npm run setup` |
-| `.claude/skills/<name>/SKILL.md` | Discord bot (SDK auto-discovers) | Create directory + SKILL.md |
-
-Both MCP files are **gitignored** (may contain auth tokens).
-
-**Task MCP:** Configured in `src/sandbox/mcp-servers.mjs` (hardcoded defaults) merged with
-`world/shared/mcp-servers.json` (operator additions). Applied to every `claude` invocation
-via `--mcp-config`. Runtime config normalizes legacy `transport:` fields to Claude CLI schema.
-
-**Discord bot MCP:** `handleMention` in `world.ts` loads `.claude/mcp-servers.json` and
-passes it as `mcpServers` to the SDK `query()` call.
+- `world/demos/<taskFolder>/` — demo-focused task workspaces
+- `world/examples/<taskFolder>/` — validation/example task workspaces
+- `world/insights/<taskFolder>/` — insight and narrative task workspaces
+- `world/workspaces/<taskFolder>/` — fallback workspace bucket
+- `world/tasks/<taskId>/logs/` — runtime and diagnostic logs
+- `output/<taskId>/` — task deliverables
 
 ---
 
-## Synchronization Contract
+## Human Alignment Protocol
 
-A running task must write to `progress.json` continuously so the operator can observe
-execution in real time and intervene at any moment.
+Alignment is event-driven and persisted.
 
-Minimum sync outputs:
-- task status
-- percent complete
-- current summary
-- latest checkpoint description
-- blockers / escalation needs
-- intervention acknowledgements
+Flow:
 
-### Sync Mechanism (real-time)
+1. **Mandatory preflight**: before any implementation work, agent must publish a plan and set `status=waiting_for_human` in `progress.json`.
+2. Operator reviews and replies with feedback or proceed instruction via terminal/Copilot CLI.
+3. If feedback is provided, agent revises plan and asks again (`waiting_for_human`) until approved.
+4. Each turn is appended to `world/alignment/<taskId>/history.ndjson`.
+5. Only after explicit proceed instruction does active execution start.
+6. During execution, additional `waiting_for_human` checkpoints may still be raised as needed.
 
-```text
- Sandbox container (entrypoint.mjs)
-     │
-     │  Claude writes world/tasks/{taskId}/progress.json after every meaningful step:
-     │    { status, percentComplete, summary, checkpoints: [{time, message}],
-     │      question? }   ← question present only when status='waiting_for_human'
-     │
-     │  Volume mount → direct write to host filesystem, no network, no copy.
-     ▼
- Host filesystem  (same physical file seen by both sides)
-     │
-     │  chokidar detects change via OS-native event (no polling)
-     │  immediately fires onProgress callback in world.ts
-     ▼
- Operator console
-     📍 [task:c54634e4] ████░░░░░░ 40% — Calling GitHub API to create footprint files
-     📍 [task:c54634e4] ██████████ 100% — Task completed. All files committed.
-```
+Stored actors:
 
-Completion gating:
-- Task completion is validated from synced `progress.json` status, not container exit code alone.
-- Auto-generated start/finish checkpoints do not count as meaningful execution evidence.
-- If a sandbox exits without meaningful progress, the task is marked `failed`.
+- `agent`
+- `operator`
+- `system`
 
-Runtime logging:
-- Logs persisted under `world/tasks/{taskId}/logs/` (claude-code.log, runtime.log, docker.log).
-- If `claude` exits 0 with empty output while `--mcp-config` is enabled → retry once without MCP.
-- Task repo naming: `task-<normalized-title>-<taskId8>`; reuse exact match first, else create new.
+Stored event kinds:
+
+- `pause_request`
+- `question`
+- `reply`
+- `resume`
+- `status`
 
 ---
 
-## Intervention Model
+## Control Surface
 
-Two directions of intervention: **operator-initiated** (you spot a problem) and
-**agent-initiated** (the agent signals it needs guidance). Both use the same
-multi-turn alignment conversation.
+LP;HU is Copilot-Chat-first:
 
-| | `/pause --task` | `waiting_for_human` |
-|---|---|---|
-| Who initiates | Operator | Agent |
-| How agent stops | `pause.signal` file → SIGTERM (no LLM needed) | Agent writes status and exits Claude |
-| Container state | Running | Running |
-| Conversation | Multi-turn inbox/re-launch loop | Multi-turn inbox/re-launch loop |
-| End condition | Operator types `/done` | Agent writes `in-progress` (or `/done`) |
+- **Read state**: `node scripts/vg.mjs overview|tasks|progress|escalations`
+- **Write/control**: `node scripts/vg-write.mjs add-task|inject-message|pause-task|resume|revise`
+- task coordination and alignment are persisted in `world/tasks/{id}/` files,
+- no Discord transport required; no stdin command parser.
 
-### Intervention Flow (ASCII)
-
-```text
-── Operator-initiated ───────────────────────────────────────────────────────
-
-  /pause --task <id> [msg]    Write pause.signal → entrypoint kills Claude (SIGTERM).
-                              Entrypoint writes waiting_for_human, enters alignment loop.
-     │
-     ▼
-  (alignment mode — same as agent-initiated below)
-     │
-     ▼
-  /done                       End alignment. Agent resumes the task.
-
-── Agent-initiated (Human Alignment Protocol) ───────────────────────────────
-
-  Agent writes progress.json:
-    { status: "waiting_for_human", question: "<specific decision needed>", ... }
-     │
-     │  chokidar fires onProgress → host detects waiting_for_human
-     ▼
-  Host prints:
-    🤔 [task:c54634e4] Agent needs your input:
-       "Should I target the v1 API or v2 API?"
-       ► Type your reply. Type /done to let agent proceed independently.
-     │
-     │  Container stays RUNNING, entrypoint polls inbox.json every 3 seconds.
-     │
-     │  ← Operator types reply (can be multi-turn)
-     ▼
-  Message written to inbox.json → entrypoint re-launches Claude with full history.
-     │
-     │  Claude either:
-     │   (a) writes status="in-progress" → resumes → alignment over
-     │   (b) writes status="waiting_for_human" again → next question shown
-     ▼
-  Conversation continues until agent has enough clarity to proceed.
-  /done sends "proceed with your best judgment" and exits alignment mode.
-
-── Global pause ─────────────────────────────────────────────────────────────
-
-  /meetup-freeze    Pause ALL running tasks simultaneously.
-  /done             Resume all.
-```
-
-### Human Alignment Protocol (agent-initiated)
-
-The agent voluntarily pauses by writing `waiting_for_human` and exiting the Claude session.
-The container stays running; `entrypoint.mjs` polls `inbox.json`.
-
-The alignment is a **multi-turn conversation**, not a single Q&A:
-- Each operator message triggers a fresh Claude re-launch with full conversation history.
-- Claude can ask follow-up questions as many times as needed.
-- When ready, Claude writes `status: "in-progress"` and continues.
-- Operator can type `/done` at any time to end the conversation.
-
-When to request alignment:
-- Task description is ambiguous in a way that would materially change the outcome.
-- A consequential binary choice has no clear winner from context.
-- External access or permissions are needed.
-
-**Not** appropriate for minor choices or anything inferrable from context.
-
-Technical flow — `/pause --task`:
-1. `world.ts` writes `pause.signal` and sets `aligningTaskId`.
-2. `runClaudeInterruptible()` polls for `pause.signal` every 2 s. When detected: signal deleted, Claude killed via SIGTERM.
-3. Entrypoint writes `waiting_for_human` and enters alignment loop.
-
-Technical flow — agent-initiated:
-1. Agent writes `status: "waiting_for_human"`, `question: "…"` and exits.
-2. `chokidar` fires → host enters alignment mode, prints `🤔`.
-3. Entrypoint drains inbox, waits for operator message (30 min timeout).
-4. Operator types reply → re-launches Claude with full history.
-5. Resume sessions have a 5-minute timeout guard. On timeout with MCP enabled, retries once without MCP. If fallback fails, task marked `failed`.
-6. Safety cap: 20 rounds maximum before auto-fail.
+**Skills and MCP** live in standard host locations (`~/.claude/`, `~/.agent/`, `~/.copilot/`):
+- Copilot CLI reads them natively.
+- Docker sandbox mounts them read-only via `FEATBIT_SKILLS_HOST_PATH` / `AGENT_HOME_HOST_PATH` env vars.
 
 ---
 
-## World Setup Assistant
+## Cron Model (Retained, Narrowed Scope)
 
-Configure world-shared resources in a **separate terminal** from `npm start`:
+`world/crons/` remains useful for periodic automation only:
 
-```sh
-npm run setup
-```
+- scheduled trend scans,
+- recurring maintenance checks,
+- weekly/monthly summaries,
+- recurring validation runs.
 
-Capabilities (task sandbox only):
-- List, add, remove MCP servers (`world/shared/mcp-servers.json`)
-- Test whether an MCP endpoint responds before committing it
-- Add, remove shared skill files (`world/shared/skills/`)
-
-For Discord bot MCP and skills, edit directly:
-- MCP: `.claude/mcp-servers.json`
-- Skills: `.claude/skills/<name>/SKILL.md`
-
-MCP changes take effect for **new** sandbox tasks only; running containers are unaffected.
+Cron is not the primary vehicle for high-touch alignment-heavy workflows.
 
 ---
 
-## Cron Jobs
+## Non-Goals
 
-Inspired by [openclaw's cron pattern](https://github.com/openclaw/openclaw). Completed tasks
-that recur on a schedule can be registered as cron jobs so the world enqueues them automatically.
-
-### How it works
-
-```
-world/crons/{id}/job.json         ← one folder per job (mirrors world/tasks/)
-       │
-       ▼
-startCronScheduler()              ← runs at world startup (src/cron/scheduler.ts)
-       │
-       ├─ schedule.kind = "cron"  → registered with node-cron (exact expression + TZ)
-       ├─ schedule.kind = "every" → polled every 5s against nextRunAtMs
-       └─ schedule.kind = "at"    → polled every 5s, fires once when past ISO timestamp
-              │
-              ├─ runtime = "local"  → runs inline (no container); posts stdout to Discord
-              └─ runtime = "docker" → enqueueTask({ createdBy: "cron", discordThreadId }) → Docker container
-                      │
-                      ▼
-              Task progress + output posted to the **cron-job's own Discord thread**
-              (NOT a new tasks-forum post — `registerExistingThread(task.id, discordThreadId)`
-               is called BEFORE `createTaskThread`, so the tasks-forum post is never created;
-               all `notifyTask` calls route to the cron thread via the thread registry)
-```
-
-Each job has a top-level `runtime` field that controls execution:
-
-| `runtime` | Execution | Payload fields |
-|---|---|---|
-| `"local"` | Inline in the Node.js process — no container overhead. Good for frequent heartbeat-style jobs. | `{ description: string }` — run.mjs is executed; stdout posted to the job's Discord thread |
-| `"docker"` | Spawns a full AI Task in a Docker container (or local Task runner). Full Claude agent. All task notifications route to the **cron job's Discord thread** instead of the tasks forum. | `{ title, description, priority? }` — becomes the Task description |
-
-### Execution isolation
-
-`runtime: "docker"` jobs **do not share a sandbox**. Each fire creates a fresh Task. With
-`RUNTIME_MODE=docker` (recommended for production) every Task gets its own Docker container.
-`runtime: "local"` jobs run inline in the world process — no isolation, but no container cost.
-
-### Discord Forum Integration
-
-When `DISCORD_CRON_CHANNEL_ID` is set to the ID of a Discord **Forum** channel:
-
-- On startup (or when a new job is added), the scheduler **creates one Forum post per enabled
-  cron job** in that channel. The post title format is:
-  `⏰ <name> | <schedule> [enabled/disabled]`.
-- After every run, the scheduler **posts a run-summary message** to the job's forum thread:
-  - ✅ success or ❌ failure
-  - For `docker` jobs: Task ID that was spawned
-  - Next scheduled run time
-- When a job is enabled/disabled via `/cron enable|disable`, the thread title is updated to
-  reflect the new status.
-- Thread IDs are persisted in each `job.json` (`state.discordThreadId`) so associations
-  survive world restarts — the scheduler re-registers the existing thread instead of creating
-  a duplicate.
-
-### Natural language management via Discord
-
-Mention the operator bot in `#general` or `#control-plane` to manage cron jobs conversationally:
-
-> `@bot show me the cron jobs`
-> `@bot add a weekly trending analysis cron job every Monday at 9am Shanghai time`
-> `@bot disable the weekly-review job`
-> `@bot fire the daily-scraper job right now`
-
-The bot reads the current cron state from `node scripts/vg.mjs cron` and queues the appropriate
-`/cron list|add|remove|enable|disable|run` command after operator confirmation.
-
-**Cron thread assistant** — @mention the bot directly **inside a cron job's forum post** for
-focused single-job management:
-
-| Your message | Bot behaviour |
-|---|---|
-| "这个 job 是干什么的？" | Immediately explains the config (schedule, payload, run stats) |
-| "它跑起来了吗？" | Shows enabled/disabled, last run time and status, next run |
-| "帮我禁用它" | Disables immediately (no confirmation — reversible) |
-| "立即运行一次" | Fires the job immediately |
-| "改成每小时跑一次" | Confirms the schedule change then queues `/cron add` (update coming) |
-| "这个 job 被删了，帮我重装" | Asks you to describe what the job should do, then constructs `/cron add` JSON and confirms |
-
-If a cron forum thread exists but the corresponding job has been **deleted from the store**, the
-bot detects the orphaned thread and guides you through recreating the job via natural language.
-
-### Schedule kinds
-
-| Kind | Example | Description |
-|---|---|---|
-| `cron` | `"0 9 * * 1"` | 5-field cron expression, optional IANA TZ |
-| `every` | `everyMs: 86400000` | Fixed interval in milliseconds |
-| `at` | `"2026-03-01T09:00:00Z"` | One-shot ISO 8601 timestamp (UTC when no TZ) |
-
-### Operator commands
-
-```
-/cron list                    List all registered jobs
-/cron add <json>              Add a new job (see schema below)
-/cron remove <id-prefix>      Delete a job
-/cron enable <id-prefix>      Enable a disabled job
-/cron disable <id-prefix>     Disable without deleting
-/cron run <id-prefix>         Fire immediately (manual trigger)
-```
-
-**JSON schema for `/cron add`:**
-
-```json
-{
-  "name": "Weekly review",
-  "enabled": true,
-  "schedule": { "kind": "cron", "expr": "0 9 * * 1", "tz": "Asia/Shanghai" },
-  "payload": {
-    "title": "Weekly review",
-    "description": "Review the week's progress and plan the next sprint",
-    "priority": "normal"
-  }
-}
-```
-
-**Direct payload** (inline action — no task, no container):
-
-```json
-{
-  "name": "Hello World",
-  "enabled": true,
-  "schedule": { "kind": "every", "everyMs": 10000 },
-  "payload": { "kind": "direct", "message": "Hello World! 👋" }
-}
-```
-
-Use `kind: "direct"` for lightweight or high-frequency actions (notifications, health pings,
-metrics collection). The scheduler executes these inline in the host process — no Docker
-containers are spawned. The result is posted as a message to the job's Discord forum thread.
-
-### Files
-
-- `src/cron/types.ts` — `CronJob`, `CronSchedule`, `CronPayload`, `CronJobState` type definitions
-- `src/cron/store.ts` — JSON store (read/write jobs, mark fired, delete-after-run, set Discord thread)
-- `src/cron/scheduler.ts` — scheduler lifecycle (`startCronScheduler`, `stopCronScheduler`, `reloadCronScheduler`); Discord thread management
-- `src/discord.ts` — `createCronJobThread`, `notifyCronJob`, `updateCronJobThreadTitle` exports
+- Mandatory per-task GitHub repository creation.
+- Role explosion into disconnected specialist silos.
+- Replacing operator judgment with opaque full autonomy.
 
 ---
 
-## Operator Quick Reference
+## Migration Notes (from previous baseline)
 
-```
-/task <description>              Create a new task
-/pause --task <id>               Pause task for alignment
-/pause --task <id> <message>     Pause + include opening message
-/msg --task <id> <message>       Inject a one-off message (no alignment mode)
-/done                            End alignment. Agent resumes independently.
-/cron list                       List all cron jobs
-/cron add <json>                 Add a recurring job (fires a task on schedule)
-/cron remove|enable|disable <id> Manage cron jobs
-/cron run <id>                   Fire a cron job immediately
-```
-
-When in **alignment mode**:
-- Type messages directly — no prefix needed.
-- Each message is sent to the task's inbox immediately.
-- Agent re-launches after each message with full conversation history.
-- `/done` ends the conversation and tells the agent to proceed.
-
----
-
-## Discord Integration
-
-### Mode A — Webhook only (one-way push)
-
-Set `DISCORD_WEBHOOK_URL` in `.env`.
-
-### Mode B — Bot (conversational @mention + slash commands + per-task threads)
-
-Requires `DISCORD_BOT_TOKEN` and `DISCORD_TASKS_CHANNEL_ID`.
-
-**Channel architecture:**
-
-| Channel type | Behaviour | Workspace |
-|---|---|---|
-| `#control-plane` | World management — create/pause/revise tasks, inspect progress | `vibeguild/` root |
-| `#tasks` Forum | One post per task; task progress & alignment messages | Task's Docker container |
-| `#cron` Forum | One post per cron job; run summaries & config management | `world/crons/<id>/` |
-| Any text channel | **Per-channel isolated assistant** — independent conversation context & workspace | `world/text-channels/<channelId>/` |
-
-**Text channels — per-channel isolation:**
-- Each ordinary text channel gets its own **isolated working directory**: `world/text-channels/<channelId>/`
-- All file writes by the AI are scoped to that directory (SDK `cwd` is set to it)
-- Conversation context (session ID) is independent per channel — different channels don’t share history
-- Capabilities: Read/Write/Bash/Web — same as the operator assistant, but file-scoped
-- Can still read world state (tasks, cron jobs) and trigger world commands via `vg-cmd.mjs`
-- The directory is created automatically on first @mention
-
-**@mention interface (control-plane or text channel):**
-
-```
-@LP;HU new task: write a blog post about feature flags
-@LP;HU list tasks
-@LP;HU status abc12345
-@LP;HU pause abc12345 please review the research direction
-@LP;HU done
-```
-
-The bot uses `@anthropic-ai/claude-agent-sdk` `query()` with per-channel session IDs.
-In control-plane: full world management prompt. In text channels: isolated assistant prompt.
-Destructive/creative actions are confirmed before executing.
-
-**Slash commands** (fallback):
-```
-/new      /tasks     /status <id>     /pause <id>     /msg <id>     /done
-```
-
-**Routing logic:**
-- World events → webhook → `#control-plane`
-- Task progress / alignment → Bot API → task's forum post thread in `#tasks`
-- @mention → `messageCreate` event → `handleMention` → Claude SDK loop → reply
-
-**Bot setup:**
-1. discord.com/developers/applications → New Application → Bot → Reset Token
-2. Enable **Message Content Intent** (Bot page → Privileged Gateway Intents)
-3. Invite URL: `https://discord.com/oauth2/authorize?client_id=<CLIENT_ID>&scope=bot+applications.commands&permissions=379968`
-
-**.env:**
-```sh
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
-DISCORD_BOT_TOKEN=your-bot-token-here
-DISCORD_CONTROL_CHANNEL_ID=<control-plane channel id>
-DISCORD_TASKS_CHANNEL_ID=<tasks forum channel id>
-DISCORD_CRON_CHANNEL_ID=<cron jobs forum channel id>   # optional; enables per-job forum posts
-```
-
-### Event routing
-
-| Event | Discord destination |
-|---|---|
-| World startup | `#control-plane` |
-| Task started | `#control-plane` |
-| Task progress 📍 | Task's forum post |
-| Alignment requested 🤔 | Task's forum post |
-| Alignment reply 💬 | Task's forum post |
-| Alignment resolved ✅ | Task's forum post |
-| Task assigned 📋 | `#control-plane` |
-| Task recovery ♻️ | `#control-plane` |
-| Cron job created | Cron's forum post (created) |
-| Cron job fired ✅/❌ | Cron's forum post (new message) |
-| Cron enabled/disabled | Cron's forum post (title updated) |
-
----
-
-## Why This Model
-
-Orchestration and execution are decoupled:
-- runtime technology can evolve (local process, Docker, stronger sandbox)
-- operator workflows stay stable (`world/` + `vg`)
-- task-level detail remains traceable in dedicated repos
-
-**Repo answers "what happened in execution." World answers "what should the operator do next."**
+- Repo-first execution assumptions are removed from runtime baseline.
+- Legacy Discord queued-command bridge (`scripts/vg-cmd.mjs`) is removed.
+- Runtime no longer depends on Discord thread repo-url updates for task progress reporting.
+- `src/discord.ts` deleted entirely. All notification calls replaced with direct `console.log`.
+- `processLine()` stdin command parser deleted (~400 lines legacy). Operator control is now via
+  `scripts/vg.mjs` (read) and `scripts/vg-write.mjs` (write) — called by Copilot Chat.
+- `scripts/vg-write.mjs` added: `add-task`, `inject-message`, `pause-task`, `resume`, `revise`.
+- Docker sandbox skills paths are now configurable via `FEATBIT_SKILLS_HOST_PATH` and
+  `AGENT_HOME_HOST_PATH` env vars (defaults to `$HOME/.claude/…` and `$HOME/.agent`).
+- `sandboxRepoUrl` added as an optional typed field to `SyncedProgress` and `Task`.
+- Workspace-first persistence is canonical.
+- Team roles moved to T-shaped model.
+- Progress carries semantic completion level, workspace path, and sandbox repo URL.
+- Alignment memory is persistent by default.

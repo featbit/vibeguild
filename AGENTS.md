@@ -59,10 +59,10 @@ sessions, task continuations, and resumes recover prior work.
 
 ### Copilot Operational Guidance
 
-When the operator asks about task queue, progress, escalations, or status,
-prefer the `vg` CLI first, then summarize the result.
+**Copilot Chat is the control plane.** Use natural language — Copilot reads `world/` files
+and runs `vg` scripts to query state and issue commands.
 
-Preferred commands:
+#### Read state (vg.mjs)
 
 ```sh
 node scripts/vg.mjs overview
@@ -72,79 +72,134 @@ node scripts/vg.mjs progress <taskId-or-prefix>
 node scripts/vg.mjs escalations [limit]
 ```
 
-Fallback policy:
+Fallback: read raw files under `world/` when CLI output is insufficient.
 
-1. Try `scripts/vg.mjs` first for low-token, operator-friendly output
-2. Only read raw files under `world/` when CLI output is insufficient
-3. Keep summaries concise and action-oriented for the operator
+#### Write / control (vg-write.mjs)
+
+```sh
+# Add a task to the queue
+node scripts/vg-write.mjs add-task "<description>" [--priority normal|high|low|critical] [--title "<title>"]
+
+# Send a message to a running task (alignment reply, instruction)
+node scripts/vg-write.mjs inject-message <taskId> "<message>"
+
+# Request alignment — kills Claude immediately via pause.signal, waits for input
+node scripts/vg-write.mjs pause-task <taskId> ["<opening message>"]
+
+# Resume a frozen task or the whole world
+node scripts/vg-write.mjs resume [--task <taskId>]
+
+# Re-queue a completed/failed task with feedback
+node scripts/vg-write.mjs revise <taskId> "<feedback>"
+```
 
 ---
 
 ## Operator Workflow (for Copilot)
 
-### Starting
+### Execution modes
+
+| Mode | Start | Best for |
+|------|-------|---------|
+| **Docker sandbox** | `npm start` in a terminal | Long-running, isolated, automated tasks |
+| **Copilot Background** | `copilot` CLI (background session) | Interactive, local, real-time collaboration |
+| **Copilot Cloud** | `/delegate` inside Copilot CLI | Async, tangential tasks, creates a PR |
+
+The `world/` task queue and `world/tasks/{id}/` state files are the shared data layer.
+`npm start` manages docker sandbox lifecycle; Background/Cloud agents use Copilot's own session state.
+
+### Starting the docker sandbox world
 
 ```sh
 npm start
 ```
 
-All operator commands (`/task`, `/pause --task`, etc.) must be typed into **this same terminal**
-— not a separate PowerShell window.
+The scheduler picks up `pending` tasks every 5 s and starts docker containers automatically.
+Monitor progress via `node scripts/vg.mjs overview`.
 
-### Managing MCP tools and shared skills
-
-Use a **separate terminal** for setup operations:
+### Creating a task (docker sandbox)
 
 ```sh
-npm run setup
+node scripts/vg-write.mjs add-task "Build a demo for feature X" --priority high
 ```
 
-`npm run setup` is the only operator flow for world-shared MCP/tool and skill management
-(add/list/remove + MCP connection test).
+Or via the CLI subcommand (same result):
 
-- Do **not** add/remove MCP or skills from the `npm start` world command console.
-- Changes are persisted to `world/shared/` and apply to **new** sandbox tasks.
-
-### Creating a task
-
-```
-/task <description>
+```sh
+node dist/world.js task "Build a demo for feature X" --priority high
 ```
 
-Wait for `📋 Task added: <uuid>` and then `🚀 [World] Starting runner` before issuing any
-`/pause` command. The task ID prefix (first 8 chars) is used in all follow-up commands.
+Watch for `🚀 [World] Starting runner` in the `npm start` terminal.
+The task ID prefix (first 8 chars) is used in all follow-up commands.
 
-### Testing / using the alignment flow
+### Alignment flow
 
-1. Create a task and wait for the first `📍` progress line.
-2. Issue a pause:
+1. Wait for `🤔 [task:<id>] Agent needs input:` in the world terminal, OR proactively pause:
+   ```sh
+   node scripts/vg-write.mjs pause-task <id-prefix> "Optional opening message"
    ```
-   /pause --task <id-prefix> <optional opening message>
+2. Watch the world terminal for `🤔` — Claude is now waiting.
+3. Send replies:
+   ```sh
+   node scripts/vg-write.mjs inject-message <id-prefix> "Your reply here"
    ```
-3. Within ~2 seconds the container's Claude process is killed via `pause.signal` + SIGTERM
-   (no LLM cooperation needed). You'll see:
+4. The agent acknowledges with `waiting_for_human` + a plan. Continue the dialogue or let it proceed:
+   ```sh
+   node scripts/vg-write.mjs inject-message <id-prefix> "Looks good, proceed"
    ```
-   📍 [task:<id>] … — Paused for alignment
-   🤔 [task:<id>] Agent needs your input:
-      "<context from pause message>"
-      ► Type your reply (press Enter to send). Type /done to let the agent proceed independently.
-   ```
-4. Type messages directly — no prefix. Each message is sent to the task inbox and Claude is
-   re-launched with the full conversation history.
-5. The agent will **always** acknowledge first (write `waiting_for_human` with its
-   understanding + plan), then ask "Shall I proceed?". You'll see its reply as:
-   ```
-   💬 [task:<id>] <acknowledgment + updated plan>
-      ► Your reply:
-   ```
-6. Reply to refine further, or type `/done` to let the agent proceed independently.
 
-### Common mistakes to avoid
+### Skills and MCP
 
-- **Do NOT** type `/pause --task` in a separate PowerShell window — it must be in the `npm start` terminal.
-- **Do NOT** issue `/pause --task` before the first `📍` appears — the container may not be running yet.
-- **Do NOT** run `/task` or `/pause` inside the `npm run setup` terminal; setup terminal is only for MCP/skill configuration.
-- If alignment resolves immediately without a `🤔` prompt, it means the previous Claude process
-  had already written `in-progress` before the signal arrived. Just issue `/pause --task` again
-  on the same task — it re-enters alignment mode.
-- `/done` ends alignment and tells the agent to proceed on its own judgment.
+Skills and MCP configs live in the standard host-side locations — **not** duplicated in `world/`:
+
+| Location | Used by |
+|----------|---------|
+| `~/.claude/plugins/…` | Docker sandbox (auto-mounted) |
+| `~/.agent/` | Docker sandbox (mounted if `AGENT_HOME_HOST_PATH` is set) |
+| `~/.copilot/` | Copilot CLI reads natively |
+| `.github/copilot-instructions.md` | Copilot CLI reads natively |
+| `AGENTS.md` | Both Copilot CLI and docker sandbox |
+
+Docker sandbox paths are configurable via env vars:
+- `FEATBIT_SKILLS_HOST_PATH` — defaults to `$HOME/.claude/plugins/marketplaces/featbit-marketplace/skills`
+- `AGENT_HOME_HOST_PATH` — defaults to `$HOME/.agent` (only mounted if non-empty)
+
+### Discussion sessions
+
+Each operator–Copilot discussion is persisted in `world/discussions/`.
+
+```
+world/discussions/
+  {id}.md        # one file per discussion thread
+```
+
+File format (frontmatter + body):
+
+```markdown
+---
+id: <uuid>
+status: open | parked | resolved
+topic: "<short topic label>"
+created: <ISO date>
+---
+
+## Summary
+<Running summary — updated as the discussion evolves>
+
+## Key Decisions
+- …
+
+## Open Questions
+- …
+
+## Next Step
+<What happens after this discussion>
+```
+
+**Workflow:**
+1. When a new topic arises, check `world/discussions/` for an existing open or parked thread on the same subject. If found, resume it.
+2. Create a new `{id}.md` when starting a fresh discussion.
+3. Update the file at each meaningful checkpoint (decision made, question answered, direction changed).
+4. Set `status: parked` when pausing mid-discussion; `status: resolved` when the thread reaches a conclusion.
+
+Copilot reads and writes these files directly — no separate tool needed.

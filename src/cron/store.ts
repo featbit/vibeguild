@@ -107,7 +107,7 @@ export const markJobFired = async (
   const job = await readJob(id);
   if (!job) return;
   job.state = {
-    discordThreadId: job.state.discordThreadId,  // preserve thread ID separately, not from spread
+    ...(job.state.discordThreadId ? { discordThreadId: job.state.discordThreadId } : {}),
     lastRunAtMs: Date.now(),
     lastTaskId: taskId || undefined,
     lastStatus: status,
@@ -123,7 +123,6 @@ export const deleteAfterFired = async (id: string): Promise<void> => {
   await removeCronJob(id);
 };
 
-/** Persist the Discord forum thread ID for a cron job. */
 export const setCronJobDiscordThread = async (id: string, discordThreadId: string): Promise<void> => {
   const job = await readJob(id);
   if (!job) return;

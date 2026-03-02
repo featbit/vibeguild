@@ -15,30 +15,34 @@ coordinates the right runtime for execution:
 - mixed tasks that depend on outputs from previous world tasks.
 
 Every world task reports back to `world/` in creator-friendly form, while deeper
-execution details can live in the task's GitHub repository.
+execution details live in each task's mounted workspace under `world/tasks/{taskId}/workspace/`.
 
 ## Quick Start
 
 ```bash
 npm install
 cp .env.example .env   # fill in ANTHROPIC_API_KEY (and optionally ANTHROPIC_BASE_URL / ANTHROPIC_MODEL_ID)
-# Optional: add DISCORD_WEBHOOK_URL to .env for Discord notifications
 npm start              # start the world — runs continuously
 ```
 
-For `RUNTIME_MODE=docker`, `VIBEGUILD_GITHUB_TOKEN` is required. Every task must create a GitHub repo;
-if repo creation fails, the task is marked `failed`.
+For `RUNTIME_MODE=docker`, each task gets a persistent mounted workspace:
+`world/{demos|examples|insights}/{taskFolder}/` ↔ `/workspace/task-workspace`.
 
-Repo lifecycle (Docker mode):
-- Repo resolution is owned by sandbox entrypoint (not host orchestrator).
-- Naming rule: `task-<normalized-task-title>-<taskId8>` (readable + deterministic).
-- Reuse rule: exact-name match first (resume same task), then latest repo with same title prefix,
-  then create new (org first, user fallback).
+Docker sandbox also mounts FeatBit Claude marketplace skills from host path
+`C:/Users/hu-be/.claude/plugins/marketplaces/featbit-marketplace/skills` into
+`/home/sandbox/.claude/plugins/marketplaces/featbit-marketplace/skills` as read-only.
+
+Task workspace lifecycle (Docker mode):
+- Workspace path is created by host runtime per task and bucketed by task type.
+- Same task ID always reuses the same workspace.
+- `/revise` continues from the existing workspace and progress history.
 
 ## Human Operator Commands
 
 All commands load `.env` automatically. The world runs in its own terminal (`npm start`);
 everything else is issued from a second terminal.
+
+Control plane is CLI-first (Copilot CLI + Copilot SDK orchestration).
 
 ### Start the world
 
@@ -70,8 +74,8 @@ npm run task -- "Discuss: top 3 ways FeatBit could grow its community this quart
 # High priority
 npm run task -- "Write a Twitter thread about feature flags for AI apps" --priority high
 
-# Require plan approval before execution
-npm run task -- "Research: what are competitors saying about progressive delivery" --plan
+# Every task now starts with mandatory plan alignment before execution
+npm run task -- "Research: what are competitors saying about progressive delivery"
 
 # Limit concurrent beings for this task (use when your model has rate limits)
 npm run task -- "Summarise this week's HN posts about feature flags" --max-beings 1
@@ -86,7 +90,7 @@ Options:
 | Flag | Values | Default | Description |
 |------|--------|---------|-------------|
 | `--priority` | `low` `normal` `high` `critical` | `normal` | Task urgency |
-| `--plan` | — | off | Require plan approval from human before execution |
+| `--plan` | — | n/a | Legacy flag. Plan approval is now mandatory for every task before execution starts. |
 | `--max-beings` | `1`, `2`, `3`… | unlimited | Total number of *distinct* beings the Leader may use across the whole task (including itself). The same being can be re-called multiple times without counting again. Use `1` to have the leader work alone. |
 
 ### Check task progress
@@ -135,9 +139,9 @@ Terminal commands available at any time in the `npm start` window:
 | `/msg --task <id> <message>` | Inject a message into a runner (soft, no abort — safe for sandbox tasks) |
 | Any other text | Queued as a human message to the Orchestrator |
 
-> **Task revision** — handled conversationally via Discord @mention.
-> Just describe what you're unhappy with in natural language; the bot AI identifies the task, extracts your feedback, and asks for confirmation before re-running.
-> Example: *"The blog task output has no real images, just AI filler — please redo it"*
+> **Task revision** — use CLI directly.
+> Run: `npm run cmd -- "/revise <task-id-or-prefix> <feedback>"`
+> Example: `npm run cmd -- "/revise 2e66dc8e The output is too generic; add concrete code examples"`
 
 ### Check escalations
 
@@ -223,12 +227,11 @@ Vibe Guild uses a two-plane model:
 
 Dual state model:
 
-- **Execution truth**: GitHub commits, `output/` deliverables — deep technical detail.
+- **Execution truth**: per-task workspace (`world/tasks/{taskId}/workspace/`) + `output/` deliverables.
 - **World truth**: `world/` progress + memory — creator-facing, intervention-ready.
 
 Runtime logs are persisted per task under `world/tasks/{id}/logs/` (for example
-`runtime.log`, `claude-code.log`, `docker.log`, `progress-events.ndjson`) and can be
-mirrored into task repos under `runtime-details/{taskId}/`.
+`runtime.log`, `claude-code.log`, `docker.log`, `progress-events.ndjson`).
 
 Compatibility guard (Docker runtime): if Claude exits `0` with empty stdout/stderr while
 `--mcp-config` is enabled, sandbox retries once without MCP config (still Claude CLI).
@@ -239,9 +242,10 @@ Sandbox isolation via precise Docker volume mounts (not prompt constraints):
 | Mount | Mode | Purpose |
 |-------|------|---------|
 | `world/tasks/{id}/` | rw | progress, inbox |
-| `world/beings/{id}/` ×N | rw | memory, profile, skills |
+| `world/tasks/{id}/workspace/` | rw | persistent task execution workspace |
 | `output/` | rw | deliverables |
 | `world/memory/world.json` | ro | read dayCount |
+| `C:/Users/hu-be/.claude/plugins/marketplaces/featbit-marketplace/skills` | ro | FeatBit Claude marketplace skills |
 | `AGENTS.md` | ro | world rules |
 | `src/sandbox/entrypoint.mjs` | ro | entrypoint only |
 
@@ -265,7 +269,8 @@ The architecture target above is now the official design baseline.
 Key rule:
 
 - The creator should be able to operate from `world/` + `vg` without reading low-level runtime files.
-- Deep execution details remain available in task runtime repos/artifacts when needed.
+- Deep execution details remain available in task workspace/log/artifact files when needed.
+- Deep execution details remain available in per-task workspace/log/artifact files when needed.
 
 ## Stack
 

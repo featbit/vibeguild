@@ -33,15 +33,13 @@ import {
   markJobFired,
   deleteAfterFired,
   setCronJobState,
-  setCronJobDiscordThread,
 } from './store.js';
 import { enqueueTask } from '../tasks/queue.js';
-import {
-  createCronJobThread,
-  notifyCronJob,
-  registerCronJobThread,
-} from '../discord.js';
 import type { CronJob, CronPayloadDocker } from './types.js';
+
+const notifyCronJob = (jobId: string, msg: string): void => {
+  console.log(`\n[cron:${jobId.slice(0, 8)}] ${msg}`);
+};
 
 // ─── Internal state ────────────────────────────────────────────────────────────
 
@@ -50,31 +48,6 @@ type CronEntry = { jobId: string; task: ScheduledTask };
 const cronEntries: CronEntry[] = [];
 let pollingTimer: ReturnType<typeof setInterval> | null = null;
 let reloadTimer: ReturnType<typeof setInterval> | null = null;
-
-// ─── Discord thread helpers ────────────────────────────────────────────────────
-
-/** Ensure a Discord forum post exists for a cron job. Creates it if missing. */
-const ensureDiscordThread = async (job: CronJob): Promise<void> => {
-  // Restore from persisted state first (survives restarts)
-  if (job.state.discordThreadId) {
-    registerCronJobThread(job.id, job.state.discordThreadId);
-    return;
-  }
-  // Create a new thread
-  const threadId = await createCronJobThread({
-    id: job.id,
-    name: job.name,
-    description: job.description,
-    enabled: job.enabled,
-    runtime: job.runtime,
-    schedule: job.schedule,
-    payload: job.payload,
-    state: job.state,
-  });
-  if (threadId) {
-    await setCronJobDiscordThread(job.id, threadId);
-  }
-};
 
 const formatRunSummary = (
   job: CronJob,
@@ -156,7 +129,6 @@ const fireJob = async (job: CronJob): Promise<void> => {
       description: dockerPayload.description,
       priority: dockerPayload.priority,
       createdBy: 'cron',
-      ...(job.state.discordThreadId ? { discordThreadId: job.state.discordThreadId } : {}),
     });
 
     // Compute next run for "every" jobs
@@ -247,7 +219,7 @@ const pollJobs = async (): Promise<void> => {
   }
 };
 
-// ─── Reload cron entries + sync Discord threads ───────────────────────────────
+// ─── Reload cron entries ───────────────────────────────────────────────────────
 
 const syncCronEntries = async (): Promise<void> => {
   const jobs = await listCronJobs({ enabledOnly: true });
@@ -259,12 +231,11 @@ const syncCronEntries = async (): Promise<void> => {
     if (!activeIds.has(id)) unregisterCronJob(id);
   }
 
-  // Add new cron entries and ensure Discord threads
+  // Add new cron entries
   for (const job of jobs) {
     if (job.schedule.kind === 'cron' && !registeredIds.has(job.id)) {
       registerCronJob(job);
     }
-    void ensureDiscordThread(job);
   }
 };
 
@@ -284,7 +255,6 @@ export const fireJobNow = async (jobId: string): Promise<string | null> => {
 
 /** * Start the cron scheduler.
  * - Registers all enabled "cron" jobs with node-cron.
- * - Ensures each active job has a Discord forum post in #cron-jobs.
  * - Initialises `nextRunAtMs` for "every" jobs that have none yet.
  * - Polls every 30 s for "every"/"at" jobs.
  * - Reloads node-cron registrations every 60 s to pick up new jobs.
@@ -292,10 +262,9 @@ export const fireJobNow = async (jobId: string): Promise<string | null> => {
 export const startCronScheduler = async (): Promise<void> => {
   const jobs = await listCronJobs({ enabledOnly: true });
 
-  // Register "cron" type jobs and create Discord threads
+  // Register "cron" type jobs
   for (const job of jobs) {
     if (job.schedule.kind === 'cron') registerCronJob(job);
-    void ensureDiscordThread(job);
   }
 
   // Initialise nextRunAtMs for "every" jobs without one

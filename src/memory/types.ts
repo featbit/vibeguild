@@ -32,3 +32,32 @@ export type Escalation = {
   beingId?: string;
   createdAt: string;
 };
+
+export type TeamRole =
+  | 'TeamLead'
+  | 'Builder'
+  | 'Verifier'
+  | 'NarrativeEngineer'
+  | 'OperatorLiaison';
+
+export type TeamManifest = {
+  teamId: string;
+  name: string;
+  leadRole: TeamRole;
+  roles: TeamRole[];
+  roleAgents: Record<TeamRole, string>;
+  initializedAt: string;
+  updatedAt: string;
+};
+
+export type AlignmentActor = 'agent' | 'operator' | 'system';
+
+export type AlignmentEventKind = 'pause_request' | 'question' | 'reply' | 'resume' | 'status';
+
+export type AlignmentEvent = {
+  taskId: string;
+  at: string;
+  actor: AlignmentActor;
+  kind: AlignmentEventKind;
+  message: string;
+};

@@ -49,7 +49,7 @@ export type CronSchedule = CronScheduleAt | CronScheduleEvery | CronScheduleCron
 /**
  * Local payload — script executed inline, no container.
  * The actual program lives in world/crons/{id}/run.mjs (Node.js ESM).
- * stdout from that script is posted to the job's Discord forum thread.
+ * stdout from that script is written to world logs.
  * description is a human-readable hint used by the bot when writing/updating run.mjs.
  */
 export type CronPayloadLocal = {
@@ -80,7 +80,7 @@ export type CronJobState = {
   lastStatus?: 'ok' | 'error';
   /** Total number of times this job has fired. */
   runCount?: number;
-  /** Discord thread/post ID in the cron jobs forum channel. */
+  /** Legacy thread identifier (control-plane compatibility only). */
   discordThreadId?: string;
 };
 

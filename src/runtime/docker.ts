@@ -4,12 +4,14 @@
  * Each container uses PRECISE volume mounts for isolation:
  *   - world/memory/world.json          :ro  — read dayCount, never write
  *   - world/tasks/{taskId}/             :rw  — progress.json + inbox.json (this task only)
+ *   - world/{demos|examples|insights}/…  :rw  — per-task persistent execution workspace
  *   - output/{taskId}/                  :rw  — per-task deliverables directory (isolated per task)
+ *   - Host Claude marketplace skills    :ro  — FeatBit marketplace skills for task execution
  *   - src/sandbox/entrypoint.mjs        :ro  — the script that drives execution
  *   - AGENTS.md                         :ro  — world rules and being identity
  *
- * No other host filesystem paths are visible inside the container.
- * This prevents a sandbox from reading/writing other tasks' data or source code.
+ * Other than these explicit mounts, no host source paths are visible inside the container.
+ * This prevents a sandbox from reading/writing task-unrelated project files or source code.
  *
  * Sync mechanism: entrypoint writes progress.json → chokidar on host detects change
  * → onProgress callback → printed to creator console in real-time.
@@ -58,6 +60,20 @@ const waitForContainer = (id: string): Promise<number> =>
     proc.stdout?.on('data', (d: Buffer) => { output += d.toString(); });
     proc.on('close', () => resolve(parseInt(output.trim(), 10) || 0));
   });
+
+const workspaceBucketForTask = (task: Task): 'demos' | 'examples' | 'insights' | 'workspaces' => {
+  if (task.taskKind === 'demo' || task.taskKind === 'skill_demo_trigger') return 'demos';
+  if (task.taskKind === 'skill_validation' || task.taskKind === 'issue_feedback') return 'examples';
+  if (task.taskKind === 'dev_insight_blog' || task.taskKind === 'learning_note') return 'insights';
+  return 'workspaces';
+};
+
+const slugify = (text: string): string =>
+  text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'task';
 
 // ─── factory ─────────────────────────────────────────────────────────────────
 
@@ -127,8 +143,8 @@ export const createDockerSandboxAdapter = (
 
     const onProgressFile = () => {
       void readProgressSync(wPath, taskId).then(async (p) => {
-        if (p?.sandboxRepoUrl) {
-          await updateTaskSandbox(taskId, { repoUrl: p.sandboxRepoUrl }).catch(() => undefined);
+        if (p?.sandboxWorkspacePath) {
+          await updateTaskSandbox(taskId, { workspacePath: p.sandboxWorkspacePath }).catch(() => undefined);
         }
         if (p) opts.onProgress?.(p);
         if (p) await logProgressEvent(p).catch(() => undefined);
@@ -145,14 +161,18 @@ export const createDockerSandboxAdapter = (
 
     start: async (task: Task) => {
       ctx.state = 'running';
-      const taskDetailsDir = `runtime-details/${task.id}`;
+      const workspaceBucket = workspaceBucketForTask(task);
+      const workspaceDirName = `${task.id.slice(0, 8)}-${slugify(task.title)}`;
+      const taskWorkspaceRelative = `world/${workspaceBucket}/${workspaceDirName}`;
 
       const claudeHomeDir = join(taskDir, 'claude-home');
+      const taskWorkspaceDir = join(wPath, workspaceBucket, workspaceDirName);
       const taskOutputDir = join(cfg.workspaceRoot, 'output', taskId);
 
       await mkdir(taskDir, { recursive: true });
       await mkdir(logsDir, { recursive: true });
       await mkdir(claudeHomeDir, { recursive: true });
+      await mkdir(taskWorkspaceDir, { recursive: true });
       await mkdir(taskOutputDir, { recursive: true });
       await logRuntime(`Task runner starting (mode=docker)`);
 
@@ -169,26 +189,24 @@ export const createDockerSandboxAdapter = (
         '-v', `${join(cfg.workspaceRoot, 'src', 'sandbox', 'mcp-servers.mjs')}:/workspace/src/sandbox/mcp-servers.mjs:ro`,
         '-v', `${join(wPath, 'shared')}:/workspace/world/shared:ro`,
         '-v', `${taskDir}:/workspace/world/tasks/${taskId}`,
+        '-v', `${taskWorkspaceDir}:/workspace/task-workspace`,
         '-v', `${claudeHomeDir}:/home/sandbox/.claude`,
+        '-v', `${cfg.featbitSkillsHostPath}:/home/sandbox/.claude/plugins/marketplaces/featbit-marketplace/skills:ro`,
+        ...(cfg.agentHomeHostPath ? ['-v', `${cfg.agentHomeHostPath}:/home/sandbox/.agent:ro`] : []),
         '-v', `${taskOutputDir}:/workspace/output`,
         '-w', '/workspace',
         '-e', `TASK_ID=${task.id}`,
         '-e', `TASK_TITLE=${encodeURIComponent(task.title)}`,
         '-e', `TASK_DESCRIPTION=${encodeURIComponent(task.description)}`,
+        '-e', `TASK_KIND=${task.taskKind}`,
+        '-e', `TASK_LEAD_ROLE=${task.leadRole}`,
         '-e', `ANTHROPIC_API_KEY=${cfg.anthropicApiKey}`,
         ...(cfg.anthropicBaseUrl ? ['-e', `ANTHROPIC_BASE_URL=${cfg.anthropicBaseUrl}`] : []),
         ...(cfg.anthropicModel ? ['-e', `ANTHROPIC_MODEL=${cfg.anthropicModel}`] : []),
         '-e', `EXECUTION_MODE=${cfg.executionMode}`,
-        '-e', `VIBEGUILD_GITHUB_TOKEN=${cfg.githubToken}`,
-        '-e', `VIBEGUILD_GITHUB_ORG=${cfg.githubOrg}`,
         '-e', `HOME=/home/sandbox`,
-        '-e', `TASK_DETAIL_DIR=${taskDetailsDir}`,
-        // Pass through Discord env vars so the sandbox agent can post to Discord directly
-        ...(process.env['DISCORD_WEBHOOK_URL']       ? ['-e', `DISCORD_WEBHOOK_URL=${process.env['DISCORD_WEBHOOK_URL']}`]             : []),
-        ...(process.env['DISCORD_BOT_TOKEN']         ? ['-e', `DISCORD_BOT_TOKEN=${process.env['DISCORD_BOT_TOKEN']}`]                 : []),
-        ...(process.env['DISCORD_CONTROL_CHANNEL_ID']? ['-e', `DISCORD_CONTROL_CHANNEL_ID=${process.env['DISCORD_CONTROL_CHANNEL_ID']}`] : []),
-        ...(process.env['DISCORD_TASKS_CHANNEL_ID']  ? ['-e', `DISCORD_TASKS_CHANNEL_ID=${process.env['DISCORD_TASKS_CHANNEL_ID']}`]   : []),
-        ...(process.env['DISCORD_CRON_CHANNEL_ID']   ? ['-e', `DISCORD_CRON_CHANNEL_ID=${process.env['DISCORD_CRON_CHANNEL_ID']}`]     : []),
+        '-e', `TASK_WORKSPACE_PATH=/workspace/task-workspace`,
+        '-e', `TASK_WORKSPACE_HOST_PATH=${taskWorkspaceRelative}`,
         cfg.dockerImage,
         'node', '/workspace/src/sandbox/entrypoint.mjs',
       ];
@@ -197,7 +215,10 @@ export const createDockerSandboxAdapter = (
       await execAsync(`docker rm -f ${containerName}`).catch(() => undefined);
 
       ctx.containerId = await dockerRunDetached(dockerArgs);
-      await updateTaskSandbox(taskId, { containerId: ctx.containerId });
+      await updateTaskSandbox(taskId, {
+        containerId: ctx.containerId,
+        workspacePath: taskWorkspaceRelative,
+      });
       await logRuntime(`Container started: ${ctx.containerId}`);
       console.log(`\n🐳 [Sandbox:${taskId.slice(0, 8)}] Container ${ctx.containerId.slice(0, 12)} started.`);
       opts.onLog?.(`🐳 [Sandbox:${taskId.slice(0, 8)}] Container started.`, taskId);
@@ -249,7 +270,7 @@ export const createDockerSandboxAdapter = (
           const err = new Error(`Sandbox container exited with code ${exitCode}`);
           await logRuntime(`FAILED: ${err.message}`);
           console.error(`\n❌ [Sandbox:${taskId.slice(0, 8)}] ${err.message}`);
-          // Capture container logs for Discord so the operator can diagnose failures
+          // Capture container logs for operator diagnostics
           try {
             const { stdout: logs, stderr: logsErr } = await execAsync(`docker logs ${ctx.containerId}`);
             const allLogs = [logs.trim(), logsErr ? logsErr.trim() : ''].filter(Boolean).join('\n');

@@ -22,8 +22,6 @@ export type RuntimeConfig = {
   anthropicBaseUrl: string;
   /** Optional: model override passed to claude CLI inside the sandbox. */
   anthropicModel: string;
-  githubToken: string;
-  githubOrg: string;
   dockerImage: string;
   /**
    * Execution model inside the sandbox.
@@ -32,6 +30,19 @@ export type RuntimeConfig = {
   executionMode: ExecutionMode;
   /** Absolute path to the workspace root (contains world/, src/, …). */
   workspaceRoot: string;
+  /**
+   * Host path to the FeatBit marketplace skills directory.
+   * Mounted read-only into the sandbox at /home/sandbox/.claude/plugins/marketplaces/featbit-marketplace/skills.
+   * Defaults to $HOME/.claude/plugins/marketplaces/featbit-marketplace/skills
+   * Override with FEATBIT_SKILLS_HOST_PATH.
+   */
+  featbitSkillsHostPath: string;
+  /**
+   * Optional: host path to the shared agent skills directory (.agent/).
+   * Mounted read-only into the sandbox at /home/sandbox/.agent.
+   * Override with AGENT_HOME_HOST_PATH.
+   */
+  agentHomeHostPath: string;
 };
 
 export const loadRuntimeConfig = (): RuntimeConfig => ({
@@ -40,11 +51,15 @@ export const loadRuntimeConfig = (): RuntimeConfig => ({
   anthropicBaseUrl: process.env['ANTHROPIC_BASE_URL'] ?? '',
   // Support both ANTHROPIC_MODEL and ANTHROPIC_MODEL_ID (the latter is used by world.ts)
   anthropicModel: process.env['ANTHROPIC_MODEL'] ?? process.env['ANTHROPIC_MODEL_ID'] ?? '',
-  githubToken: process.env['VIBEGUILD_GITHUB_TOKEN'] ?? '',
-  githubOrg: process.env['VIBEGUILD_GITHUB_ORG'] ?? 'vibeguild',
   dockerImage: process.env['SANDBOX_DOCKER_IMAGE'] ?? 'vibeguild-sandbox',
   executionMode: (process.env['EXECUTION_MODE'] ?? 'v1') as ExecutionMode,
   workspaceRoot: process.env['WORKSPACE_ROOT'] ?? process.cwd(),
+  featbitSkillsHostPath:
+    process.env['FEATBIT_SKILLS_HOST_PATH'] ??
+    `${process.env['USERPROFILE'] ?? process.env['HOME'] ?? ''}/.claude/plugins/marketplaces/featbit-marketplace/skills`,
+  agentHomeHostPath:
+    process.env['AGENT_HOME_HOST_PATH'] ??
+    `${process.env['USERPROFILE'] ?? process.env['HOME'] ?? ''}/.agent`,
 });
 
 /** Absolute path to the world/ directory (always under workspaceRoot). */
